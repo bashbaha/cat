@@ -5,9 +5,7 @@
 
 ### Advantages
 
-1) No need for collections of different channels from a specific speaker. 
- 
- Specifically, it needs labeled data under their repective channels: speakerA from channel A, speakerB from channel B is ok. Not ask for speakerA has channelA and channel B at the same time any more.
+1) No need for collections of different channels from a specific speaker. Specifically, it needs labeled data under their repective channels: speakerA from channel A, speakerB from channel B is ok. Not ask for speakerA has channelA and channel B at the same time any more.
 
 2) Referring to domain adaption, use Gradient Reversal Layer(GRL) to learn channel-invariant and speaker-discriminative speech representations via channel adversarial training.
 
