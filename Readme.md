@@ -24,6 +24,13 @@
 5) channel predictor: D2
 
 
+###Dataset
+1) paper: 60 utterance 8 seconds each speaker. 8min/speaker
+
+2) our dataset1: collected from app on iphone or android phone. only use: random text audio at the begining of project. 
+
+3) our dataset2: collected from telephone.
+
 
 
 ###Cautions
