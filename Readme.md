@@ -1,6 +1,6 @@
-#Channel Adverarial Training for Cross-Channel Text-Independent Speaker Recognition -- Xin Fang et. al
+## Channel Adverarial Training for Cross-Channel Text-Independent Speaker Recognition -- Xin Fang et. al
 
-###Advantages
+### Advantages
 
 1) No need for collections of different channels from a specific speaker. 
  
@@ -12,7 +12,7 @@
 3）The paper can not only alleviating the channel mismatch problem, but also outperforms state-of-the-art speaker recognition methods.
 
 
-###Model
+### Model
 1) Input: 500,64,1  filter-bank
 
 2) Pad to short utterance, divide the long utterance into multiple short segments by employing a sliding window without overlap.
@@ -24,7 +24,7 @@
 5) channel predictor: D2
 
 
-###Dataset
+### Dataset
 1) paper: 60 utterance 8 seconds each speaker. 8min/speaker
 
 2) our dataset1: collected from app on iphone or android phone. only use: random text audio at the begining of project. 
@@ -33,7 +33,7 @@
 
 
 
-###Cautions
+### Cautions
 
 1) gradient reversal layer may be worse when the model converges at the end.  [refer to: https://www.zhihu.com/question/266710153]
 
