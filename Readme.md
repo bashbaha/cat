@@ -1,5 +1,8 @@
 ## Channel Adverarial Training for Cross-Channel Text-Independent Speaker Recognition -- Xin Fang et. al
 
+#### This code repository is an unofficial implement about CAT(Channel Adverarial Training) paper above.
+
+
 ### Advantages
 
 1) No need for collections of different channels from a specific speaker. 
@@ -9,8 +12,9 @@
 2) Referring to domain adaption, use Gradient Reversal Layer(GRL) to learn channel-invariant and speaker-discriminative speech representations via channel adversarial training.
 
 
-3）The paper can not only alleviating the channel mismatch problem, but also outperforms state-of-the-art speaker recognition methods.
+3) The paper can not only alleviating the channel mismatch problem, but also outperforms state-of-the-art speaker recognition methods.
 
+---
 
 ### Model
 1) Input: 500,64,1  filter-bank
@@ -23,15 +27,26 @@
 
 5) channel predictor: D2
 
+6) optimizer: SGD, initial learnging rate: 0.2, decayed on performance on the development set.
+
+7) batch normalization and dropout are employed
+
+8) batch_size: 64
+
+9) α in Eq.(3) is 1
+
+10) β in Eq.(11) is 1
+
+---
 
 ### Dataset
 1) paper: 60 utterance 8 seconds each speaker. 8min/speaker
 
-2) our dataset1: collected from app on iphone or android phone. only use: random text audio at the begining of project. 
+2) dataset1: librispeech 
 
 3) our dataset2: collected from telephone.
 
-
+---
 
 ### Cautions
 
