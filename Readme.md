@@ -17,7 +17,7 @@
 ### Model
 1) Input: 500,64,1  filter-bank
 
-2) Pad to short utterance, divide the long utterance into multiple short segments by employing a sliding window without overlap.
+2) Pad to short utterance, divide the long utterance into multiple short segments by employing a sliding window without overlap. Specifically, because of the input is 500 frames which is about 5 seconds, the long utterance are divided into 5.5 seconds per sub-utterance, drop the last sub-utterance if its duration less than 3 seconds, and pad the last sub-utterance to 5.5 seconds other wise.
 
 3) feature extractor: Generator (2-layer UniLSTMP)
 
