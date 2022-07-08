@@ -6,7 +6,7 @@ import random
 import numpy as np
 import torchaudio
 import torch
-
+import math
 
   
 def parse_args():
@@ -80,13 +80,156 @@ class MyDataset(Dataset):
     def __len__(self):
         return len(self.file_ids) // self.batch_size
 
-class Generator():
-    def __init__(self):
-        print ("init Generator")
+class LSTMPCell(nn.Module):
+
+    def __init__(self, input_size, hidden_size, projection_size):
+        super(LSTMPCell, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.projection_size = projection_size
+
+        self.weight_xi = nn.Parameter(torch.randn(hidden_size, input_size))
+        self.weight_xf = nn.Parameter(torch.randn(hidden_size, input_size))
+        self.weight_xc = nn.Parameter(torch.randn(hidden_size, input_size))
+        self.weight_xo = nn.Parameter(torch.randn(hidden_size, input_size))
+
+        self.bias_xi = nn.Parameter(torch.randn(hidden_size))
+        self.bias_xf = nn.Parameter(torch.randn(hidden_size))
+        self.bias_xc = nn.Parameter(torch.randn(hidden_size))
+        self.bias_xo = nn.Parameter(torch.randn(hidden_size))
+
+        self.weight_hi = nn.Parameter(torch.randn(hidden_size, projection_size))
+        self.weight_hf = nn.Parameter(torch.randn(hidden_size, projection_size))
+        self.weight_hc = nn.Parameter(torch.randn(hidden_size, projection_size))
+        self.weight_ho = nn.Parameter(torch.randn(hidden_size, projection_size))
+
+        self.bias_hi = nn.Parameter(torch.randn(hidden_size))
+        self.bias_hf = nn.Parameter(torch.randn(hidden_size))
+        self.bias_hc = nn.Parameter(torch.randn(hidden_size))
+        self.bias_ho = nn.Parameter(torch.randn(hidden_size))
+
+        self.weight_project = nn.Parameter(torch.randn(projection_size, hidden_size))
+
+
+    def forward(self, input, state):
+        if state is not None:
+            hx, cx = state
+        else:
+            hx = input.new_zeros(input.size(0), self.projection_size, requires_grad=False)
+            cx = input.new_zeros(input.size(0), self.hidden_size, requires_grad=False)
+
+        input_gate = torch.mm(input, self.weight_xi.t()) + self.bias_xi + torch.mm(hx, self.weight_hi.t()) + self.bias_hi
+        forget_gate = torch.mm(input, self.weight_xf.t()) + self.bias_xf + torch.mm(hx, self.weight_hf.t()) + self.bias_hf
+        cell_gate = torch.mm(input, self.weight_xc.t()) + self.bias_xc + torch.mm(hx, self.weight_hc.t()) + self.bias_hc
+        output_gate = torch.mm(input, self.weight_xo.t()) + self.bias_xo + torch.mm(hx, self.weight_ho.t()) + self.bias_ho
+
+        ct = torch.mul(forget_gate, cx) + torch.mul(input_gate, cell_gate)
+        ht = torch.mul(output_gate, torch.tanh(ct))
+        ht = torch.mm(ht, self.weight_project.t())
+
+        return ht, (ht, ct)
+
+    def init_weights(self):
+        stdv = 1.0 / math.sqrt(self.hidden_size)
+
+        nn.init.uniform_(self.weight_xi, -stdv, stdv)
+        nn.init.uniform_(self.weight_xf, -stdv, stdv)
+        nn.init.uniform_(self.weight_xc, -stdv, stdv)
+        nn.init.uniform_(self.weight_xo, -stdv, stdv)
+
+        nn.init.uniform_(self.weight_hi, -stdv, stdv)
+        nn.init.uniform_(self.weight_hf, -stdv, stdv)
+        nn.init.uniform_(self.weight_hc, -stdv, stdv)
+        nn.init.uniform_(self.weight_ho, -stdv, stdv)
+
+        nn.init.uniform_(self.bias_xi, -stdv, stdv)
+        nn.init.uniform_(self.bias_xf, -stdv, stdv)
+        nn.init.uniform_(self.bias_xc, -stdv, stdv)
+        nn.init.uniform_(self.bias_xo, -stdv, stdv)
+
+        nn.init.uniform_(self.bias_hi, -stdv, stdv)
+        nn.init.uniform_(self.bias_hf, -stdv, stdv)
+        nn.init.uniform_(self.bias_hc, -stdv, stdv)
+        nn.init.uniform_(self.bias_ho, -stdv, stdv)
+
+class LSTMPLayer(nn.Module):
+    
+    def __init__(self, input_size, hidden_size, projection_size):
+        super(LSTMPLayer, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.projection_size = projection_size
+        self.cell = LSTMPCell(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
+    
+    def forward(self, input, state):
+        outputs = []
+        for item in range(input.size()[0]):
+            out, state = self.cell(input[item],state)
+            outputs += [out]
+        return torch.stack(outputs, dim=0), state
+
+class Generator(nn.Module):
+
+    def __init__(self, input_size, hidden_size, projection_size):
+        super(Generator, self).__init__()
+        self.LSTMPLayer1 = LSTMPLayer(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
+        self.LSTMPLayer2 = LSTMPLayer(input_size=projection_size, hidden_size=hidden_size, projection_size=projection_size)
+
+    def forward(self, input, state):
+        output, state = self.LSTMPLayer1(input, state)
+        output, state = self.LSTMPLayer2(output, state)
+
+        return output
         
-class Discriminator_speaker():
-    def __init__(self):
-        print ("init Discriminator_speaker")
+class Discriminator_speaker(nn.Module):
+
+    def __init__(self, speaker_classes):
+        super(Discriminator_speaker, self).__init__()
+        self.speaker_classes = speaker_classes
+        self.conv1 = nn.Conv2d(1, 64, 3, stride=1, padding='same')
+        self.maxpool1 = nn.MaxPool2d((2, 2), stride=(2, 2))
+        self.conv2 = nn.Conv2d(64, 128, 3, stride=1, padding='same')
+        self.maxpool2 = nn.MaxPool2d((2, 2), stride=(2, 2))
+        self.conv3 = nn.Conv2d(128, 256, 3, stride=1, padding='same')
+        self.maxpool3 = nn.MaxPool2d((2, 2), stride=(2, 2))
+        self.conv4 = nn.Conv2d(256, 512, 3, stride=1, padding='same')
+        self.maxpool4 = nn.MaxPool2d((2, 2), stride=(2, 2))
+        self.conv5 = nn.Conv2d(512, 512, 3, stride=1, padding='same')
+        self.avgpool = nn.AvgPool2d((31, 1), stride=1)
+        self.fc = nn.Linear(4*512, speaker_classes)
+    
+    def forward(self, input):
+        output = self.conv1(input)
+        output = self.maxpool1(output)
+        output = self.conv2(output)
+        output = self.maxpool2(output)
+        output = self.conv3(output)
+        output = self.maxpool3(output)
+        output = self.conv4(output)
+        output = self.maxpool4(output)
+        output = self.conv5(output)
+        output = self.avgpool(output)
+        output = output.squeeze()
+        output = output.reshape(output.size(0),(output.size(1)*output.size(2)))
+        output = self.fc(output)
+
+        return output
+
+class Gradient_Reversal_Layer(torch.autograd.Function):
+
+    def __init__(self, Lambda):
+        super(Gradient_Reversal_Layer, self).__init__()
+        self.Lambda = Lambda
+    
+    def forward(self, input):
+        return input.view_as(input)
+
+    def backward(self, grad_output):
+        grad_input = grad_output.clone()
+        return grad_input * (-self.Lambda)
+
+    def set_Lambda(self, Lambda):
+        self.Lambda = Lambda
 
 class FullyConnect_speaker(nn.Module):
     def __init__(self):
@@ -97,9 +240,31 @@ class FullyConnect_speaker(nn.Module):
     def forward(self,x):
         return self.fc(x)
 
-class Discriminator_channel():
-    def __init__(self):
-        print ("init Discriminator_channel")
+class Discriminator_channel(nn.Module):
+
+    def __init__(self, GRL=False):
+        super(Discriminator_channel, self).__init__()
+        if GRL:
+           self.grl = GRL
+        self.fc1 = nn.Linear()
+        self.fc2 = nn.Linear()
+        self.fc3 = nn.Linear()
+        self.fc4 = nn.Linear()
+        self.fc5 = nn.Linear()
+        self.fc6 = nn.Linear()
+        self.maxpool = nn.MaxPool1d()
+
+    def forward(self, input):
+        if getattr(self, "grl", None) is not None:
+            input = self.grl(input)
+        output = self.fc1(input)
+        output = self.fc2(output)
+        output = self.fc3(output)
+        output = self.fc4(output)
+        output = self.fc5(output)
+        output = self.fc6(output)
+
+        return output
 
 def main(args):
     num_classes = 251
@@ -131,6 +296,20 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         spk_feature = D1(generator_feature)
         pred_speakerid = FC_D1(spk_feature)
         pred_channel = D2(generator_feature)
+
+        # example input & output
+        # input = torch.randn(2, 500, 64, 1)
+        # input = input.squeeze(dim=-1)
+        # input = input.transpose(dim0=0, dim1=1)
+        # hx = input.new_zeros(input.size(1), projection_size, requires_grad=False)
+        # cx = input.new_zeros(input.size(1), hidden_size, requires_grad=False)
+        # state = [hx, cx]
+        # G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
+        # output = G(input, state)
+        # output = output.transpose(dim0=0, dim1=1)
+        # output = output.unsqueeze(dim=1)
+        # D = Discriminator_speaker(speaker_classes=speaker_classes)
+        # output = D(output) 
 
         Ls = Class_CrossEntropyLoss(pred_speakerid,y)
         #TODO: spk_feature needs to be normalized for cosine distance, hmm think.
