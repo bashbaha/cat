@@ -216,13 +216,12 @@ class Discriminator_speaker(nn.Module):
         #output = self.fc(output)
 
         return output
-
-class Gradient_Reversal_Layer(torch.autograd.Function):
+class Gradient_Reversal_Layer(nn.Module):
 
     def __init__(self, Lambda):
         super(Gradient_Reversal_Layer, self).__init__()
         self.Lambda = Lambda
-    
+
     def forward(self, input):
         return input.view_as(input)
 
@@ -233,28 +232,20 @@ class Gradient_Reversal_Layer(torch.autograd.Function):
     def set_Lambda(self, Lambda):
         self.Lambda = Lambda
 
-class FullyConnect_speaker(nn.Module):
-    def __init__(self):
-        print ("init FullyConnect_speaker")
-        super(FullyConnect_speaker,self).__init__() 
-        self.fc = nn.Linear(4 * 512, 512) 
-
-    def forward(self,x):
-        return self.fc(x)
 
 class Discriminator_channel(nn.Module):
 
     def __init__(self, GRL=False):
         super(Discriminator_channel, self).__init__()
         if GRL:
-           self.grl = GRL
-        self.fc1 = nn.Linear(64,64)
-        self.fc2 = nn.Linear(64,64)
-        self.fc3 = nn.Linear(64,64)
-        self.fc4 = nn.Linear(64,64)
-        self.fc5 = nn.Linear(64,64)
-        self.fc6 = nn.Linear(64,64)
-        self.avgpool = nn.AvgPool1d(3, stride=2) #TODO check.
+           self.grl = Gradient_Reversal_Layer(Lambda=1)
+        self.fc1 = nn.Linear(64, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128,64)
+        self.fc4 = nn.Linear(64, 32)
+        self.fc5 = nn.Linear(32, 8)
+        self.fc6 = nn.Linear(8, 2)
+        self.avgpool = nn.AvgPool2d(kernel_size=(500,1), stride=1)
 
     def forward(self, input):
         if getattr(self, "grl", None) is not None:
@@ -266,8 +257,19 @@ class Discriminator_channel(nn.Module):
         output = self.fc5(output)
         output = self.fc6(output)
         output = self.avgpool(output)
+        output = output.squeeze()
 
         return output
+
+class FullyConnect_speaker(nn.Module):
+    def __init__(self):
+        print ("init FullyConnect_speaker")
+        super(FullyConnect_speaker,self).__init__() 
+        self.fc = nn.Linear(4 * 512, 512) 
+
+    def forward(self,x):
+        return self.fc(x)
+
 
 class TripleLoss(nn.Module):
     def __init__(self, margin=0.3):
@@ -434,10 +436,12 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         # state = [hx, cx]
         # G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
         # output = G(input, state)
-        # output = output.transpose(dim0=0, dim1=1)
-        # output = output.unsqueeze(dim=1)
+        # output_LSTM = output.transpose(dim0=0, dim1=1)
+        # output = output_LSTM.unsqueeze(dim=1)
         # D = Discriminator_speaker(speaker_classes=speaker_classes)
-        # output = D(output) 
+        # output = D(output)
+        # D2 = Discriminator_channel(GRL=True)
+        # output = D2(output_LSTM)
 
         pass
     
