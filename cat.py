@@ -19,7 +19,7 @@ def parse_args():
 
 class MyDataset(Dataset):
     def __init__(self, mode = 'train', batch_size = 8):
-        print ("init dataset")
+        #print ("init dataset")
         self.mode = mode
         self.datafile = '../data/train_demo.list'
         self.file_ids = open(self.datafile,'r').readlines()
@@ -117,6 +117,7 @@ class LSTMPCell(nn.Module):
         if state is not None:
             hx, cx = state
         else:
+            print ('set hx cx to zeros !!!!!!!!!!!!!')
             hx = input.new_zeros(input.size(0), self.projection_size, requires_grad=False)
             cx = input.new_zeros(input.size(0), self.hidden_size, requires_grad=False)
 
@@ -187,9 +188,8 @@ class Generator(nn.Module):
         
 class Discriminator_speaker(nn.Module):
 
-    def __init__(self, speaker_classes):
+    def __init__(self):
         super(Discriminator_speaker, self).__init__()
-        self.speaker_classes = speaker_classes
         self.conv1 = nn.Conv2d(1, 64, 3, stride=1, padding='same')
         self.maxpool1 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv2 = nn.Conv2d(64, 128, 3, stride=1, padding='same')
@@ -199,8 +199,7 @@ class Discriminator_speaker(nn.Module):
         self.conv4 = nn.Conv2d(256, 512, 3, stride=1, padding='same')
         self.maxpool4 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv5 = nn.Conv2d(512, 512, 3, stride=1, padding='same')
-        self.avgpool = nn.AvgPool2d((31, 1), stride=1)
-        self.fc = nn.Linear(4*512, speaker_classes)
+        self.avgpool = nn.AvgPool2d((31, 4), stride=1) # TODO check. diff with paper
     
     def forward(self, input):
         #input: (batch_size, 1, timestep_width, height)
@@ -214,11 +213,9 @@ class Discriminator_speaker(nn.Module):
         output = self.maxpool4(output)
         output = self.conv5(output)
         output = self.avgpool(output)
-        output = output.squeeze()
-        output = output.reshape(output.size(0),(output.size(1)*output.size(2)))
-        #output = self.fc(output)
-        #output: (batch_size, 4 x 512)   #TODO check
+        #output: (batch_size, 512)   #TODO check
         return output
+
 class Gradient_Reversal_Layer(nn.Module):
 
     def __init__(self, Lambda):
@@ -239,52 +236,75 @@ class Gradient_Reversal_Layer(nn.Module):
 
 class Discriminator_channel(nn.Module):
 
-    def __init__(self, GRL=False):
+    def __init__(self):
         super(Discriminator_channel, self).__init__()
-        if GRL:
-           self.grl = Gradient_Reversal_Layer(Lambda=1)
-        self.fc1 = nn.Linear(64, 128)  #TODO check. input should be flatten, input dimension may be 500 x 64
+        self.grl = Gradient_Reversal_Layer(Lambda=1)
+        #TODO check. may need dropout , RELU or Sigmoid
+        self.fc1 = nn.Linear(500 * 64, 128)  #TODO check. input should be flatten, input dimension may be (batch_size, 500 x 64)
         self.fc2 = nn.Linear(128, 128)
         self.fc3 = nn.Linear(128,64)
         self.fc4 = nn.Linear(64, 32)
         self.fc5 = nn.Linear(32, 8)
-        self.fc6 = nn.Linear(8, 2)
-        self.avgpool = nn.AvgPool2d(kernel_size=(500,1), stride=1)
+        self.fc6 = nn.Linear(8, 4)
+        self.avgpool = nn.AvgPool1d(kernel_size=2, stride=2) #TODO check.
 
     def forward(self, input):
-        if getattr(self, "grl", None) is not None:
-            input = self.grl(input)
+        input = self.grl(input)
+        #print ('---------------------')
+        #print ('Discriminator_channel input.shape')
+        #print (input.shape)
+        input = input.reshape(-1,500 * 64)
+        #print (input.shape)
+        #print ('---------------------')
         output = self.fc1(input)
         output = self.fc2(output)
         output = self.fc3(output)
         output = self.fc4(output)
         output = self.fc5(output)
         output = self.fc6(output)
+        output = output.unsqueeze(1)
+        #print ('Discriminator_channel output.shape')
+        #print (output.shape)
         output = self.avgpool(output)
+        #print (output.shape)
         output = output.squeeze()
+        #print (output.shape)
+        #print ('---------------------')
 
         return output
 
 class FullyConnect_speaker(nn.Module):
     def __init__(self):
-        print ("init FullyConnect_speaker")
+        #print ("init FullyConnect_speaker")
         super(FullyConnect_speaker,self).__init__() 
-        self.fc = nn.Linear(4 * 512, 512) 
+        self.fc = nn.Linear(512, 512) 
 
     def forward(self,x):
-        return self.fc(x)
+        #print ('---------------------')
+        #print ('FullyConnect_speaker input.shape')
+        #print (x.shape)
+        output = self.fc(x)
+        #print (output.shape)
+        #print ('---------------------')
+        return output
+        
 
 class TripleLoss(nn.Module):
     def __init__(self, margin=0.3):
         super(TripleLoss, self).__init__()
         self.margin = margin # 阈值
         self.rank_loss = nn.MarginRankingLoss(margin=margin)
-        self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
         self.tripletloss = nn.TripletMarginLoss(margin=1.0, reduction='sum')
 
     def forward(self, inputs, labels, norm=False):      
-        dist_mat = self.cosine_dist(inputs, inputs, norm=norm)  # 距离矩阵,越大越相似。
+        dist_mat = self.cosine_dist(inputs, inputs)  # 距离矩阵,越大越相似。
         dist_ap, dist_an = self.hard_sample(dist_mat, labels) # 取出每个anchor对应的hard sample.
+        print ('TripleLoss info:')
+        print (inputs.shape)
+        print (dist_ap.shape)
+        print (dist_ap)
+        print (dist_an.shape)
+        print (dist_an)
         loss = self.tripletloss(inputs,dist_ap,dist_an)
         
         return loss
@@ -295,6 +315,10 @@ class TripleLoss(nn.Module):
         assert len(dist_mat.size()) == 2
         assert dist_mat.size(0) == dist_mat.size(1)
         N = dist_mat.size(0)
+        print ('---------------------')
+        print ('TripleLoss dist_mat')
+        print (dist_mat)
+        
 
         # 选出所有正负样本对
         is_pos = labels.expand(N, N).eq(labels.expand(N, N).t()) # 两两组合， 取label相同的a-p
@@ -308,7 +332,11 @@ class TripleLoss(nn.Module):
 
         dist_ap = torch.cat(list_ap)  # 将list里的tensor拼接成新的tensor
         dist_an = torch.cat(list_an)
-
+        print ('dist_ap')
+        print (dist_ap)
+        print ('dist_an')
+        print (dist_an)
+        print ('---------------------')
         return dist_ap, dist_an
 
     @staticmethod
@@ -331,11 +359,13 @@ class TripleLoss(nn.Module):
 
     @staticmethod
     def cosine_dist(x, y):
-        x = self.normalize(x)
-        y = self.normalize(y)
-        dist = torch.mm(x,y) #cosine distance because x,y are normalized.
+        x = normalize(x)
+        y = normalize(y)
+        print ('compute cosine:')
+        print (x)
+        print (y)
+        dist = torch.mm(x,y.t()) #cosine distance because x,y are normalized.
         return dist
-
 
 
 def normalize(x, axis=1):
@@ -346,13 +376,12 @@ def main(args):
     num_classes = 20
     batch_size = 8
     lr_init = 0.02
-    epochs = 10
+    epochs = 2
     input_size = 64 
     hidden_size = 128
     projection_size = 64
-    speaker_classes = 512
     
-    D1 = Discriminator_speaker(speaker_classes=num_classes).cuda()
+    D1 = Discriminator_speaker().cuda()
     FC_D1 = FullyConnect_speaker().cuda()
     D2 = Discriminator_channel().cuda()
     G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size).cuda()
@@ -360,11 +389,11 @@ def main(args):
     Class_CrossEntropyLoss = nn.CrossEntropyLoss()
     AdversarialLoss = nn.BCELoss()
     Triple_loss = TripleLoss()
-
+    
     optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters(), 'lr': 1e-3} ], lr=2e-1, momentum=0.9)
     optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, ], lr=2e-1, momentum=0.9)
-
-
+    
+    
     train_dataset = MyDataset(mode='train')
     train_dataloader = DataLoader(train_dataset,batch_size = 1, shuffle=False, drop_last=True, num_workers=5 )
     
@@ -378,27 +407,44 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         optimizer_D1G.zero_grad()
         optimizer_D2.zero_grad()
 
+        x = x.squeeze()
+        x = x.transpose(dim0=0, dim1=1)
         x = x.cuda()
+        y = y.squeeze()
         y = y.cuda()
         input_size = 64 
         hidden_size = 128
         projection_size = 64
-        speaker_classes = 512
         
-        #example input & output
+        ##example input & output
         input = torch.randn(8, 500, 64, 1)
         input = input.squeeze(dim=-1)
         input = input.transpose(dim0=0, dim1=1)
-        hx = input.new_zeros(input.size(1), projection_size, requires_grad=False)
-        cx = input.new_zeros(input.size(1), hidden_size, requires_grad=False)
+        hx = torch.randn(input.size(1), projection_size, requires_grad=False).cuda()
+        cx = torch.randn(input.size(1), hidden_size, requires_grad=False).cuda()
         state = [hx, cx]
-        print (x.shape)
+        print ('------------')
+        print ('type(x):')
+        print (type(x))
+        print ('x:')
+        print (x)
+        print ('state:')
+        print (state)
+        #print ('type(input):')
+        #print (type(input))
+        #print (input.shape)
+        #print ('------------')
         generator_feature = G(x,state)
-        print (generator_feature.shape)
+        generator_feature = generator_feature.transpose(dim0=0, dim1=1)
+        generator_feature = generator_feature.unsqueeze(dim=1)
+        print ('generator_feature:')
+        print (generator_feature)
         spk_embedding = D1(generator_feature)
+        spk_embedding = spk_embedding.squeeze()
+        print ('spk_embedding:')
+        print (spk_embedding)
         pred_speakerid = FC_D1(spk_embedding)
         pred_channel = D2(generator_feature)
-        
  
         #train G,D1
         G.train()
@@ -412,39 +458,39 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         #update gradients.  TODO:MIN?
         optimizer_D1G.step()
 
-        #train D2
-        G.eval()
-        D1.eval()
-        D2.train()
-        #get channel_label
-        channel_label = []
-        for i in y:
-            if i.item() < 10:
-                channel_label.append(0)    
-            else:
-                channel_label.append(1)    
-        channel_label = torch.from_numpy(np.array(channel_label))
-        L_d2 = Class_CrossEntropyLoss(pred_channel,channel_label)
-        L_d2.backward()
-        #update gradients. TODO:max?
-        optimizer_D2.step()
+        ##train D2
+        #G.eval()
+        #D1.eval()
+        #D2.train()
+        ##get channel_label
+        #channel_label = []
+        #for i in y:
+        #    if i.item() < 10:
+        #        channel_label.append(0)    
+        #    else:
+        #        channel_label.append(1)    
+        #channel_label = torch.from_numpy(np.array(channel_label))
+        #L_d2 = Class_CrossEntropyLoss(pred_channel,channel_label)
+        #L_d2.backward()
+        ##update gradients. TODO:max?
+        #optimizer_D2.step()
         
 
         # example input & output
-        # input = torch.randn(2, 500, 64, 1)
-        # input = input.squeeze(dim=-1)
-        # input = input.transpose(dim0=0, dim1=1)
-        # hx = input.new_zeros(input.size(1), projection_size, requires_grad=False)
-        # cx = input.new_zeros(input.size(1), hidden_size, requires_grad=False)
-        # state = [hx, cx]
-        # G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
-        # output = G(input, state)
-        # output_LSTM = output.transpose(dim0=0, dim1=1)
-        # output = output_LSTM.unsqueeze(dim=1)
-        # D = Discriminator_speaker(speaker_classes=speaker_classes)
-        # output = D(output)
-        # D2 = Discriminator_channel(GRL=True)
-        # output = D2(output_LSTM)
+        #input = torch.randn(8, 500, 64, 1)
+        #input = input.squeeze(dim=-1)
+        #input = input.transpose(dim0=0, dim1=1)
+        #hx = input.new_zeros(input.size(1), projection_size, requires_grad=False)
+        #cx = input.new_zeros(input.size(1), hidden_size, requires_grad=False)
+        #state = [hx, cx]
+        #G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
+        #output = G(input, state)
+        #output_LSTM = output.transpose(dim0=0, dim1=1)
+        #output = output_LSTM.unsqueeze(dim=1)
+        #D = Discriminator_speaker()
+        #output = D(output)
+        #D2 = Discriminator_channel()
+        #output = D2(output_LSTM)
 
         pass
     
