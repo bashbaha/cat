@@ -178,9 +178,11 @@ class Generator(nn.Module):
         self.LSTMPLayer2 = LSTMPLayer(input_size=projection_size, hidden_size=hidden_size, projection_size=projection_size)
 
     def forward(self, input, state):
+        #input:(timestep, batch_size, input_dimension)
         output, state = self.LSTMPLayer1(input, state)
         output, state = self.LSTMPLayer2(output, state)
 
+        #output:(timestep, batch_size, hidden_size)
         return output
         
 class Discriminator_speaker(nn.Module):
@@ -201,6 +203,7 @@ class Discriminator_speaker(nn.Module):
         self.fc = nn.Linear(4*512, speaker_classes)
     
     def forward(self, input):
+        #input: (batch_size, 1, timestep_width, height)
         output = self.conv1(input)
         output = self.maxpool1(output)
         output = self.conv2(output)
@@ -214,7 +217,7 @@ class Discriminator_speaker(nn.Module):
         output = output.squeeze()
         output = output.reshape(output.size(0),(output.size(1)*output.size(2)))
         #output = self.fc(output)
-
+        #output: (batch_size, 4 x 512)   #TODO check
         return output
 class Gradient_Reversal_Layer(nn.Module):
 
@@ -233,13 +236,14 @@ class Gradient_Reversal_Layer(nn.Module):
         self.Lambda = Lambda
 
 
+
 class Discriminator_channel(nn.Module):
 
     def __init__(self, GRL=False):
         super(Discriminator_channel, self).__init__()
         if GRL:
            self.grl = Gradient_Reversal_Layer(Lambda=1)
-        self.fc1 = nn.Linear(64, 128)
+        self.fc1 = nn.Linear(64, 128)  #TODO check. input should be flatten, input dimension may be 500 x 64
         self.fc2 = nn.Linear(128, 128)
         self.fc3 = nn.Linear(128,64)
         self.fc4 = nn.Linear(64, 32)
@@ -269,7 +273,6 @@ class FullyConnect_speaker(nn.Module):
 
     def forward(self,x):
         return self.fc(x)
-
 
 class TripleLoss(nn.Module):
     def __init__(self, margin=0.3):
