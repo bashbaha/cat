@@ -39,7 +39,7 @@ class MyDataset(Dataset):
         assert self.batch_size % files_per_id == 0 
         #select ids in this batch for triplet loss
         selected_ids = random.sample(range(0,len(self.ids)), self.batch_size // files_per_id)
-        selected_files = [ random.sample(range(np.where(self.labelids == selected_id)[0][0],np.where(self.labelids == selected_id)[0][-1] + 1 ),2) for selected_id in selected_ids] 
+        selected_files = [ random.sample(range(np.where(self.labelids == selected_id)[0][0],np.where(self.labelids == selected_id)[0][-1] + 1 ),files_per_id) for selected_id in selected_ids] 
         selected_files = _flatten(selected_files)
         print ("selected_files:" + str(selected_files))
          
@@ -303,8 +303,8 @@ class TripleLoss(nn.Module):
         list_ap, list_an = [], []
         # 取出所有正样本对和负样本对的距离值
         for i in range(N):
-            list_ap.append( dist_mat[i][is_pos[i]].min().unsqueeze(0) )  #hard: 相同标签，选择距离小的。
-            list_an.append( dist_mat[i][is_neg[i]].max().unsqueeze(0) )  #hard: 不同标签，选择距离大的。
+            list_ap.append( dist_mat[i][is_pos[i]].min().unsqueeze(0) )  #hard: 相同标签，选择cosine距离小的。
+            list_an.append( dist_mat[i][is_neg[i]].max().unsqueeze(0) )  #hard: 不同标签，选择cosine距离大的。
 
         dist_ap = torch.cat(list_ap)  # 将list里的tensor拼接成新的tensor
         dist_an = torch.cat(list_an)
