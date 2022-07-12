@@ -3,8 +3,8 @@ import wave
 import os
 import numpy as np
 
-#basepath = '/datasdb/user/huangmingming/sr/cat/data/xinshen/chedai/'
-basepath = '/datasdb/user/huangmingming/sr/cat/data/librispeech'
+#basepath = 'cat/data/business'
+basepath = 'cat/data/librispeech'
 f_wav =  os.path.join(basepath,sys.argv[1])
 f_target = os.path.join(basepath,"pcm_vad_split_5.5sec",sys.argv[1][:-4])
 data = wave.open(f_wav,'rb')
