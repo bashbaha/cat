@@ -126,6 +126,11 @@ class LSTMPCell(nn.Module):
         cell_gate = torch.mm(input, self.weight_xc.t()) + self.bias_xc + torch.mm(hx, self.weight_hc.t()) + self.bias_hc
         output_gate = torch.mm(input, self.weight_xo.t()) + self.bias_xo + torch.mm(hx, self.weight_ho.t()) + self.bias_ho
 
+        input_gate = torch.sigmoid(input_gate)
+        forget_gate = torch.sigmoid(forget_gate)
+        cell_gate = torch.sigmoid(cell_gate)
+        output_gate = torch.sigmoid(output_gate)
+
         ct = torch.mul(forget_gate, cx) + torch.mul(input_gate, cell_gate)
         ht = torch.mul(output_gate, torch.tanh(ct))
         ht = torch.mm(ht, self.weight_project.t())
