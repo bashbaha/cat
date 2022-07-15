@@ -9,13 +9,15 @@ import torchaudio
 import torch
 import math
 import argparse
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(log_dir='log')
 
   
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--lr', default=2e-1, type=float, help='learning rate')
     parser.add_argument('--batch_size', default=8, type=int, help='batch size per GPU')
-    parser.add_argument('--epochs', default=10, type=int, help='epochs')
+    parser.add_argument('--epochs', default=100, type=int, help='epochs')
 
 class MyDataset(Dataset):
     def __init__(self, mode = 'train', batch_size = 8):
@@ -49,6 +51,7 @@ class MyDataset(Dataset):
         for idx in selected_files:
 
             f,label = self.file_ids[idx].strip().split(" ")
+            print ('read from :' + str(f))
             wav,sr = torchaudio.load(f,normalize=False)
             assert sr == self.sample_rate
             wav = wav / 1.0
@@ -112,6 +115,7 @@ class LSTMPCell(nn.Module):
 
         self.weight_project = nn.Parameter(torch.randn(projection_size, hidden_size))
 
+        self.init_weights()
 
     def forward(self, input, state):
         if state is not None:
@@ -120,7 +124,8 @@ class LSTMPCell(nn.Module):
             print ('set hx cx to zeros !!!!!!!!!!!!!')
             hx = input.new_zeros(input.size(0), self.projection_size, requires_grad=False)
             cx = input.new_zeros(input.size(0), self.hidden_size, requires_grad=False)
-
+        
+        hx, cx = state
         input_gate = torch.mm(input, self.weight_xi.t()) + self.bias_xi + torch.mm(hx, self.weight_hi.t()) + self.bias_hi
         forget_gate = torch.mm(input, self.weight_xf.t()) + self.bias_xf + torch.mm(hx, self.weight_hf.t()) + self.bias_hf
         cell_gate = torch.mm(input, self.weight_xc.t()) + self.bias_xc + torch.mm(hx, self.weight_hc.t()) + self.bias_hc
@@ -128,9 +133,9 @@ class LSTMPCell(nn.Module):
 
         input_gate = torch.sigmoid(input_gate)
         forget_gate = torch.sigmoid(forget_gate)
-        cell_gate = torch.sigmoid(cell_gate)
+        cell_gate = torch.tanh(cell_gate)
         output_gate = torch.sigmoid(output_gate)
-
+        
         ct = torch.mul(forget_gate, cx) + torch.mul(input_gate, cell_gate)
         ht = torch.mul(output_gate, torch.tanh(ct))
         ht = torch.mm(ht, self.weight_project.t())
@@ -160,6 +165,8 @@ class LSTMPCell(nn.Module):
         nn.init.uniform_(self.bias_hc, -stdv, stdv)
         nn.init.uniform_(self.bias_ho, -stdv, stdv)
 
+        nn.init.uniform_(self.weight_project, -stdv, stdv)
+
 class LSTMPLayer(nn.Module):
     
     def __init__(self, input_size, hidden_size, projection_size):
@@ -177,15 +184,27 @@ class LSTMPLayer(nn.Module):
         return torch.stack(outputs, dim=0), state
 
 class Generator(nn.Module):
+    #use official LSTMP
+    def __init__(self,input_size, hidden_size, projection_size):
+        super(Generator, self).__init__()
+        self.num_layers = 2
+        self.lstmp = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=self.num_layers, proj_size=projection_size)
 
-    def __init__(self, input_size, hidden_size, projection_size):
+    def forward(self,x):
+        output, (h,c) = self.lstmp(x)
+        return output
+
+class Generator_OUR(nn.Module):
+
+    def __init__(self, input_size, hidden_size, projection_size, state=None):
         super(Generator, self).__init__()
         self.LSTMPLayer1 = LSTMPLayer(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
         self.LSTMPLayer2 = LSTMPLayer(input_size=projection_size, hidden_size=hidden_size, projection_size=projection_size)
+        self.state = state
 
-    def forward(self, input, state):
+    def forward(self, input):
         #input:(timestep, batch_size, input_dimension)
-        output, state = self.LSTMPLayer1(input, state)
+        output, state = self.LSTMPLayer1(input, self.state)
         output, state = self.LSTMPLayer2(output, state)
 
         #output:(timestep, batch_size, hidden_size)
@@ -196,29 +215,81 @@ class Discriminator_speaker(nn.Module):
     def __init__(self):
         super(Discriminator_speaker, self).__init__()
         self.conv1 = nn.Conv2d(1, 64, 3, stride=1, padding='same')
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
         self.maxpool1 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv2 = nn.Conv2d(64, 128, 3, stride=1, padding='same')
+        self.bn2 = nn.BatchNorm2d(128)
         self.maxpool2 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv3 = nn.Conv2d(128, 256, 3, stride=1, padding='same')
+        self.bn3 = nn.BatchNorm2d(256)
         self.maxpool3 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv4 = nn.Conv2d(256, 512, 3, stride=1, padding='same')
+        self.bn4 = nn.BatchNorm2d(512)
         self.maxpool4 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv5 = nn.Conv2d(512, 512, 3, stride=1, padding='same')
+        self.bn5 = nn.BatchNorm2d(512)
         self.avgpool = nn.AvgPool2d((31, 4), stride=1) # TODO check. diff with paper
+        self.init_weights()
+
+    def init_weights(self):
+        nn.init.xavier_uniform_(self.conv1.weight)
+        nn.init.xavier_uniform_(self.conv2.weight)
+        nn.init.xavier_uniform_(self.conv3.weight)
+        nn.init.xavier_uniform_(self.conv4.weight)
+        nn.init.xavier_uniform_(self.conv5.weight)
+        nn.init.zeros_(self.conv1.bias)
+        nn.init.zeros_(self.conv2.bias)
+        nn.init.zeros_(self.conv3.bias)
+        nn.init.zeros_(self.conv4.bias)
+        nn.init.zeros_(self.conv5.bias)
     
-    def forward(self, input):
+    def forward(self, x):
+        print ('self.conv1.weight:')
+        print (self.conv1.weight)
+        print ('self.conv2.weight:')
+        print (self.conv2.weight)
+        print ('self.conv3.weight:')
+        print (self.conv3.weight)
+        print ('self.conv4.weight:')
+        print (self.conv4.weight)
+        print ('self.conv5.weight:')
+        print (self.conv5.weight)
         #input: (batch_size, 1, timestep_width, height)
-        output = self.conv1(input)
+        #TODO find the best compose of relu and tanh.
+        output = self.tanh(self.bn1(self.conv1(x)))
         output = self.maxpool1(output)
-        output = self.conv2(output)
+        output = self.tanh(self.bn2(self.conv2(output)))
         output = self.maxpool2(output)
-        output = self.conv3(output)
+        output = self.tanh(self.bn3(self.conv3(output)))
         output = self.maxpool3(output)
-        output = self.conv4(output)
+        output = self.tanh(self.bn4(self.conv4(output)))
         output = self.maxpool4(output)
-        output = self.conv5(output)
+        output = self.tanh(self.bn5(self.conv5(output)))
         output = self.avgpool(output)
+        print ('-------------------')
+        print ('Discriminator_speaker output.shape')
+        output = output.reshape(-1,512)
+        print (output.shape)
+
         #output: (batch_size, 512)   #TODO check
+        return output
+
+class FullyConnect_speaker(nn.Module):
+    def __init__(self, num_classes):
+        #print ("init FullyConnect_speaker")
+        super(FullyConnect_speaker,self).__init__() 
+        self.num_classes = num_classes
+        self.fc = nn.Linear(512, self.num_classes) 
+
+    def forward(self,x):
+        print ('---------------------')
+        print ('FullyConnect_speaker input.shape')
+        print (x.shape)
+        output = self.fc(x)
+        #print (output.shape)
+        print ('---------------------')
         return output
 
 class Gradient_Reversal_Layer(nn.Module):
@@ -278,39 +349,21 @@ class Discriminator_channel(nn.Module):
 
         return output
 
-class FullyConnect_speaker(nn.Module):
-    def __init__(self):
-        #print ("init FullyConnect_speaker")
-        super(FullyConnect_speaker,self).__init__() 
-        self.fc = nn.Linear(512, 512) 
-
-    def forward(self,x):
-        #print ('---------------------')
-        #print ('FullyConnect_speaker input.shape')
-        #print (x.shape)
-        output = self.fc(x)
-        #print (output.shape)
-        #print ('---------------------')
-        return output
         
 
 class TripleLoss(nn.Module):
     def __init__(self, margin=0.3):
         super(TripleLoss, self).__init__()
         self.margin = margin # 阈值
-        self.rank_loss = nn.MarginRankingLoss(margin=margin)
-        self.tripletloss = nn.TripletMarginLoss(margin=1.0, reduction='sum')
+        #self.rank_loss = nn.MarginRankingLoss(margin=margin)
+        #self.tripletloss = nn.TripletMarginLoss(margin=0.3, reduction='sum')
 
     def forward(self, inputs, labels, norm=False):      
         dist_mat = self.cosine_dist(inputs, inputs)  # 距离矩阵,越大越相似。
         dist_ap, dist_an = self.hard_sample(dist_mat, labels) # 取出每个anchor对应的hard sample.
-        print ('TripleLoss info:')
-        print (inputs.shape)
-        print (dist_ap.shape)
-        print (dist_ap)
-        print (dist_an.shape)
-        print (dist_an)
-        loss = self.tripletloss(inputs,dist_ap,dist_an)
+        loss = dist_an + self.margin - dist_ap
+        #loss = nn.functional.relu(loss)
+        loss = torch.sum(loss)
         
         return loss
 
@@ -323,26 +376,33 @@ class TripleLoss(nn.Module):
         print ('---------------------')
         print ('TripleLoss dist_mat')
         print (dist_mat)
+        dist_mat_ap = dist_mat.clone()
+        dist_mat_an = dist_mat.clone()
         
 
         # 选出所有正负样本对
         is_pos = labels.expand(N, N).eq(labels.expand(N, N).t()) # 两两组合， 取label相同的a-p
-        is_neg = labels.expand(N, N).ne(labels.expand(N, N).t()) # 两两组合， 取label不同的a-n
-
-        list_ap, list_an = [], []
-        # 取出所有正样本对和负样本对的距离值
         for i in range(N):
-            list_ap.append( dist_mat[i][is_pos[i]].min().unsqueeze(0) )  #hard: 相同标签，选择cosine距离小的。
-            list_an.append( dist_mat[i][is_neg[i]].max().unsqueeze(0) )  #hard: 不同标签，选择cosine距离大的。
+            is_pos[i][i] = False
+        for i in range(N):
+            for j in range(N):
+                if is_pos[i][j] == False:
+                    dist_mat_ap[i][j] = dist_mat_ap[i][j] + 2
+        
+        list_ap = torch.amin(dist_mat_ap,1)
+        
+                
+        
+        is_neg = labels.expand(N, N).ne(labels.expand(N, N).t()) # 两两组合， 取label不同的a-n
+        for i in range(N):
+            for j in range(N):
+                if is_neg[i][j] == False:
+                    dist_mat_an[i][j] = dist_mat_an[i][j] - 2
 
-        dist_ap = torch.cat(list_ap)  # 将list里的tensor拼接成新的tensor
-        dist_an = torch.cat(list_an)
-        print ('dist_ap')
-        print (dist_ap)
-        print ('dist_an')
-        print (dist_an)
-        print ('---------------------')
-        return dist_ap, dist_an
+        list_an = torch.amax(dist_mat_an,1)
+        
+        
+        return list_ap, list_an
 
     @staticmethod
     def normalize(x, axis=1):
@@ -381,21 +441,32 @@ def main(args):
     num_classes = 20
     batch_size = 8
     lr_init = 0.02
-    epochs = 2
+    epochs = 100
     input_size = 64 
     hidden_size = 128
     projection_size = 64
     
     D1 = Discriminator_speaker().cuda()
-    FC_D1 = FullyConnect_speaker().cuda()
+    FC_D1 = FullyConnect_speaker(num_classes).cuda()
     D2 = Discriminator_channel().cuda()
-    G = Generator(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size).cuda()
     
-    Class_CrossEntropyLoss = nn.CrossEntropyLoss()
+    ##example input & output
+    input = torch.randn(8, 500, 64, 1)
+    input = input.squeeze(dim=-1)
+    input = input.transpose(dim0=0, dim1=1)
+    hx = torch.randn(input.size(1), projection_size, requires_grad=False).cuda()
+    cx = torch.randn(input.size(1), hidden_size, requires_grad=False).cuda()
+    state = [hx, cx]
+    #G = Generator(input_size, hidden_size, projection_size, state=state).cuda()
+    G = Generator(input_size, hidden_size, projection_size).cuda()
+    
+    #for data unbalanced 
+    classes_weight = torch.Tensor([30,30,30,30,30,30,30,30,30,30,1,1,1,1,1,1,1,1,1,1]).cuda()
+    Class_CrossEntropyLoss = nn.CrossEntropyLoss(weight=classes_weight)
     AdversarialLoss = nn.BCELoss()
     Triple_loss = TripleLoss()
     
-    optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters(), 'lr': 1e-3} ], lr=2e-1, momentum=0.9)
+    optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters()} ], lr=1e-3, momentum=0.9)
     optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, ], lr=2e-1, momentum=0.9)
     
     
@@ -407,39 +478,33 @@ def main(args):
 
 
 def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss, Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, args):
+    cur_idx = 0
     for batch_id,(x,y) in enumerate(train_dataloader):
-
+        cur_idx = cur_idx + 1
+        idx = epoch * batch_size + cur_idx
         optimizer_D1G.zero_grad()
         optimizer_D2.zero_grad()
-
+        
         x = x.squeeze()
         x = x.transpose(dim0=0, dim1=1)
         x = x.cuda()
         y = y.squeeze()
         y = y.cuda()
-        input_size = 64 
-        hidden_size = 128
-        projection_size = 64
-        
-        ##example input & output
-        input = torch.randn(8, 500, 64, 1)
-        input = input.squeeze(dim=-1)
-        input = input.transpose(dim0=0, dim1=1)
-        hx = torch.randn(input.size(1), projection_size, requires_grad=False).cuda()
-        cx = torch.randn(input.size(1), hidden_size, requires_grad=False).cuda()
-        state = [hx, cx]
         print ('------------')
-        print ('type(x):')
-        print (type(x))
-        print ('x:')
-        print (x)
-        print ('state:')
-        print (state)
+        #print ('type(x):')
+        #print (type(x))
+        #print ('x:')
+        print ('x.shape:')
+        print (x.shape)
+        #print ('state:')
+        #print (state)
         #print ('type(input):')
         #print (type(input))
         #print (input.shape)
         #print ('------------')
-        generator_feature = G(x,state)
+        generator_feature = G(x)
+        print ('generator_feature.shape:')
+        print (generator_feature.shape)
         generator_feature = generator_feature.transpose(dim0=0, dim1=1)
         generator_feature = generator_feature.unsqueeze(dim=1)
         print ('generator_feature:')
@@ -450,24 +515,39 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         print (spk_embedding)
         pred_speakerid = FC_D1(spk_embedding)
         pred_channel = D2(generator_feature)
- 
+        
         #train G,D1
-        G.train()
-        D1.train()
-        D2.eval()
+        #G.train()
+        #D1.train()
+        #D2.eval()
+
         #compute loss
         Ls = Class_CrossEntropyLoss(pred_speakerid,y)
+        #Ls.backward()
+        #print ('pred_speakerid:')
+        #print (pred_speakerid)
+        #print('y:')
+        #print(y)
         Lt = Triple_loss(spk_embedding, y)
+        #Lt.backward()
         L_d1 = Ls + Lt
         L_d1.backward()
         #update gradients.  TODO:MIN?
+        writer.add_scalar('loss/triple', Lt.item(),idx)
+        writer.add_scalar('loss/softmax', Ls.item(),idx)
+        writer.add_scalar('loss/triple+softmax', L_d1.item(),idx)
         optimizer_D1G.step()
+        #print ('Lt loss:')
+        #print (Lt.item())
+        #print ('Ls loss:')
+        #print (Ls.item())
 
         ##train D2
         #G.eval()
         #D1.eval()
         #D2.train()
         ##get channel_label
+        #TODO get channel label gracefully.
         #channel_label = []
         #for i in y:
         #    if i.item() < 10:
