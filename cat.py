@@ -7,6 +7,7 @@ import random
 import numpy as np
 import torchaudio
 import torch
+torch.autograd.set_detect_anomaly(True)
 import math
 import argparse
 from torch.utils.tensorboard import SummaryWriter
@@ -317,11 +318,19 @@ class Discriminator_channel(nn.Module):
         self.grl = Gradient_Reversal_Layer(Lambda=1)
         #TODO check. may need dropout , RELU or Sigmoid
         self.fc1 = nn.Linear(500 * 64, 128)  #TODO check. input should be flatten, input dimension may be (batch_size, 500 x 64)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.dropout= nn.Dropout(p=0.2)
+        self.tanh = nn.Tanh()
         self.fc2 = nn.Linear(128, 128)
+        self.bn2 = nn.BatchNorm1d(128)
         self.fc3 = nn.Linear(128,64)
+        self.bn3 = nn.BatchNorm1d(64)
         self.fc4 = nn.Linear(64, 32)
+        self.bn4 = nn.BatchNorm1d(32)
         self.fc5 = nn.Linear(32, 8)
+        self.bn5 = nn.BatchNorm1d(8)
         self.fc6 = nn.Linear(8, 4)
+        self.bn6 = nn.BatchNorm1d(4)
         self.avgpool = nn.AvgPool1d(kernel_size=2, stride=2) #TODO check.
 
     def forward(self, input):
@@ -331,16 +340,17 @@ class Discriminator_channel(nn.Module):
         #print (input.shape)
         input = input.reshape(-1,500 * 64)
         #print (input.shape)
-        #print ('---------------------')
         output = self.fc1(input)
-        output = self.fc2(output)
-        output = self.fc3(output)
-        output = self.fc4(output)
-        output = self.fc5(output)
-        output = self.fc6(output)
+        print ('---------------------')
+        print ('Discriminator_channel output.shape')
+        print (output.shape)
+        output = self.dropout(self.tanh(self.bn1(self.fc1(input))))
+        output = self.dropout(self.tanh(self.bn2(self.fc2(output))))
+        output = self.dropout(self.tanh(self.bn3(self.fc3(output))))
+        output = self.dropout(self.tanh(self.bn4(self.fc4(output))))
+        output = self.dropout(self.tanh(self.bn5(self.fc5(output))))
+        output = self.bn6(self.fc6(output))
         output = output.unsqueeze(1)
-        #print ('Discriminator_channel output.shape')
-        #print (output.shape)
         output = self.avgpool(output)
         #print (output.shape)
         output = output.squeeze()
@@ -460,24 +470,26 @@ def main(args):
     #G = Generator(input_size, hidden_size, projection_size, state=state).cuda()
     G = Generator(input_size, hidden_size, projection_size).cuda()
     
-    #for data unbalanced 
-    classes_weight = torch.Tensor([30,30,30,30,30,30,30,30,30,30,1,1,1,1,1,1,1,1,1,1]).cuda()
+    #for data unbalanced . train_demo.xls. librispeech 10, xinshen 10.
+    classes_weight = torch.Tensor([0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.0550, 0.0075, 0.0189, 0.1211, 0.0378, 0.0108, 0.1514, 0.2018, 0.0075, 0.0144]).cuda()
     Class_CrossEntropyLoss = nn.CrossEntropyLoss(weight=classes_weight)
+    #TODO set weights for unbalanced label.
+    Channel_CrossEntropyLoss = nn.CrossEntropyLoss()
     AdversarialLoss = nn.BCELoss()
     Triple_loss = TripleLoss()
     
     optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters()} ], lr=1e-3, momentum=0.9)
-    optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, ], lr=2e-1, momentum=0.9)
+    optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, {'params': G.parameters()} ], lr=1e-3, momentum=0.9)
     
     
     train_dataset = MyDataset(mode='train')
     train_dataloader = DataLoader(train_dataset,batch_size = 1, shuffle=False, drop_last=True, num_workers=5 )
     
     for epoch in range(epochs):
-        train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss,Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, args)
+        train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss,Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss, args)
 
 
-def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss, Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, args):
+def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss, Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss, args):
     cur_idx = 0
     for batch_id,(x,y) in enumerate(train_dataloader):
         cur_idx = cur_idx + 1
@@ -490,18 +502,6 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         x = x.cuda()
         y = y.squeeze()
         y = y.cuda()
-        print ('------------')
-        #print ('type(x):')
-        #print (type(x))
-        #print ('x:')
-        print ('x.shape:')
-        print (x.shape)
-        #print ('state:')
-        #print (state)
-        #print ('type(input):')
-        #print (type(input))
-        #print (input.shape)
-        #print ('------------')
         generator_feature = G(x)
         print ('generator_feature.shape:')
         print (generator_feature.shape)
@@ -514,51 +514,55 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         print ('spk_embedding:')
         print (spk_embedding)
         pred_speakerid = FC_D1(spk_embedding)
-        pred_channel = D2(generator_feature)
         
         #train G,D1
-        #G.train()
-        #D1.train()
-        #D2.eval()
-
+        G.train()
+        D1.train()
+        D2.eval()
         #compute loss
         Ls = Class_CrossEntropyLoss(pred_speakerid,y)
-        #Ls.backward()
-        #print ('pred_speakerid:')
-        #print (pred_speakerid)
-        #print('y:')
-        #print(y)
         Lt = Triple_loss(spk_embedding, y)
-        #Lt.backward()
         L_d1 = Ls + Lt
         L_d1.backward()
         #update gradients.  TODO:MIN?
         writer.add_scalar('loss/triple', Lt.item(),idx)
         writer.add_scalar('loss/softmax', Ls.item(),idx)
         writer.add_scalar('loss/triple+softmax', L_d1.item(),idx)
+        #TODO  maybe not same with Eq.11. Detail: D2'G network parameters shoud be update in condition of same input with D1.
         optimizer_D1G.step()
-        #print ('Lt loss:')
-        #print (Lt.item())
-        #print ('Ls loss:')
-        #print (Ls.item())
 
-        ##train D2
-        #G.eval()
-        #D1.eval()
-        #D2.train()
+        #train D2
+        G.train()
+        D2.train()
+        optimizer_D1G.zero_grad()
+        optimizer_D2.zero_grad()
+        generator_feature = G(x)
+        generator_feature = generator_feature.transpose(dim0=0, dim1=1)
+        generator_feature = generator_feature.unsqueeze(dim=1)
+        pred_channel = D2(generator_feature)
         ##get channel_label
         #TODO get channel label gracefully.
-        #channel_label = []
-        #for i in y:
-        #    if i.item() < 10:
-        #        channel_label.append(0)    
-        #    else:
-        #        channel_label.append(1)    
-        #channel_label = torch.from_numpy(np.array(channel_label))
-        #L_d2 = Class_CrossEntropyLoss(pred_channel,channel_label)
-        #L_d2.backward()
-        ##update gradients. TODO:max?
-        #optimizer_D2.step()
+        channel_label = []
+        for i in y:
+            if i.item() < 10:
+                channel_label.append(0)    
+            else:
+                channel_label.append(1)    
+        channel_label = torch.from_numpy(np.array(channel_label)).cuda()
+        print ('--------------------------')
+        print ('pred_channel.shape:')
+        print (pred_channel.shape)
+        print (pred_channel)
+        print ('channel_label.shape:')
+        print (channel_label.shape)
+        print (channel_label)
+        #TODO Eq.10 is max loss. check.
+        L_d2 = 0 - Channel_CrossEntropyLoss(pred_channel,channel_label)
+        #L_d2 = Channel_CrossEntropyLoss(pred_channel,channel_label)
+        L_d2.backward()
+        writer.add_scalar('loss/channel', L_d2.item(),idx)
+        #update gradients. TODO:max?
+        optimizer_D2.step()
         
 
         # example input & output
