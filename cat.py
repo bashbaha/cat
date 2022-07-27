@@ -7,24 +7,35 @@ import random
 import numpy as np
 import torchaudio
 import torch
+import torch.nn.functional as F
 torch.autograd.set_detect_anomaly(True)
 import math
 import argparse
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(log_dir='log')
+writer = SummaryWriter(log_dir='log_bigbatch_easyNegative')
 
+#change dataset, you may need to modify:
+#1.batch_size
+#2.pos_files_per_id
+#3.classes_weight
+#4.channel_weight
+#5.num_classes
+#6.datafile
+#7.channel_label
   
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--lr', default=2e-1, type=float, help='learning rate')
-    parser.add_argument('--batch_size', default=8, type=int, help='batch size per GPU')
+    parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
+    parser.add_argument('--batch_size', default=512, type=int, help='batch size per GPU')
     parser.add_argument('--epochs', default=100, type=int, help='epochs')
+    args = parser.parse_args()
+    return args
 
 class MyDataset(Dataset):
     def __init__(self, mode = 'train', batch_size = 8):
         #print ("init dataset")
         self.mode = mode
-        self.datafile = '../data/train_demo.list'
+        self.datafile = '../data/train.list'
         self.file_ids = open(self.datafile,'r').readlines()
         self.labelids = np.array([int(line.strip().split(" ")[-1]) for line in self.file_ids])
         #get ids set for triplet loss
@@ -37,12 +48,12 @@ class MyDataset(Dataset):
 
     def __getitem__(self, batch_idx):
    
-        files_per_id = 2
+        pos_files_per_id = 4 #max is 4 for 95 self data.
         
-        assert self.batch_size % files_per_id == 0 
+        assert self.batch_size % pos_files_per_id == 0 
         #select ids in this batch for triplet loss
-        selected_ids = random.sample(range(0,len(self.ids)), self.batch_size // files_per_id)
-        selected_files = [ random.sample(range(np.where(self.labelids == selected_id)[0][0],np.where(self.labelids == selected_id)[0][-1] + 1 ),files_per_id) for selected_id in selected_ids] 
+        selected_ids = random.sample(range(0,len(self.ids)), self.batch_size // pos_files_per_id)
+        selected_files = [ random.sample(range(np.where(self.labelids == selected_id)[0][0],np.where(self.labelids == selected_id)[0][-1] + 1 ),pos_files_per_id) for selected_id in selected_ids] 
         selected_files = _flatten(selected_files)
         print ("selected_files:" + str(selected_files))
          
@@ -53,7 +64,7 @@ class MyDataset(Dataset):
 
             f,label = self.file_ids[idx].strip().split(" ")
             print ('read from :' + str(f))
-            wav,sr = torchaudio.load(f,normalize=False)
+            wav,sr = torchaudio.load(f,normalize=True)
             assert sr == self.sample_rate
             wav = wav / 1.0
             feature = fbank(wav, dither=1,high_freq=-200, low_freq=64, htk_compat=True,  num_mel_bins=self.height, sample_frequency=self.sample_rate, use_energy=False, window_type='hamming')
@@ -80,135 +91,31 @@ class MyDataset(Dataset):
 
         #TODO: make sure feature is normalized.
         features = features.reshape(self.batch_size, self.width, self.height)
+        print ('input_features:')
+        print (features.shape)
+        print (features)
 
         return features,labels
 
     def __len__(self):
         return len(self.file_ids) // self.batch_size
 
-class LSTMPCell(nn.Module):
-
-    def __init__(self, input_size, hidden_size, projection_size):
-        super(LSTMPCell, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.projection_size = projection_size
-
-        self.weight_xi = nn.Parameter(torch.randn(hidden_size, input_size))
-        self.weight_xf = nn.Parameter(torch.randn(hidden_size, input_size))
-        self.weight_xc = nn.Parameter(torch.randn(hidden_size, input_size))
-        self.weight_xo = nn.Parameter(torch.randn(hidden_size, input_size))
-
-        self.bias_xi = nn.Parameter(torch.randn(hidden_size))
-        self.bias_xf = nn.Parameter(torch.randn(hidden_size))
-        self.bias_xc = nn.Parameter(torch.randn(hidden_size))
-        self.bias_xo = nn.Parameter(torch.randn(hidden_size))
-
-        self.weight_hi = nn.Parameter(torch.randn(hidden_size, projection_size))
-        self.weight_hf = nn.Parameter(torch.randn(hidden_size, projection_size))
-        self.weight_hc = nn.Parameter(torch.randn(hidden_size, projection_size))
-        self.weight_ho = nn.Parameter(torch.randn(hidden_size, projection_size))
-
-        self.bias_hi = nn.Parameter(torch.randn(hidden_size))
-        self.bias_hf = nn.Parameter(torch.randn(hidden_size))
-        self.bias_hc = nn.Parameter(torch.randn(hidden_size))
-        self.bias_ho = nn.Parameter(torch.randn(hidden_size))
-
-        self.weight_project = nn.Parameter(torch.randn(projection_size, hidden_size))
-
-        self.init_weights()
-
-    def forward(self, input, state):
-        if state is not None:
-            hx, cx = state
-        else:
-            print ('set hx cx to zeros !!!!!!!!!!!!!')
-            hx = input.new_zeros(input.size(0), self.projection_size, requires_grad=False)
-            cx = input.new_zeros(input.size(0), self.hidden_size, requires_grad=False)
-        
-        hx, cx = state
-        input_gate = torch.mm(input, self.weight_xi.t()) + self.bias_xi + torch.mm(hx, self.weight_hi.t()) + self.bias_hi
-        forget_gate = torch.mm(input, self.weight_xf.t()) + self.bias_xf + torch.mm(hx, self.weight_hf.t()) + self.bias_hf
-        cell_gate = torch.mm(input, self.weight_xc.t()) + self.bias_xc + torch.mm(hx, self.weight_hc.t()) + self.bias_hc
-        output_gate = torch.mm(input, self.weight_xo.t()) + self.bias_xo + torch.mm(hx, self.weight_ho.t()) + self.bias_ho
-
-        input_gate = torch.sigmoid(input_gate)
-        forget_gate = torch.sigmoid(forget_gate)
-        cell_gate = torch.tanh(cell_gate)
-        output_gate = torch.sigmoid(output_gate)
-        
-        ct = torch.mul(forget_gate, cx) + torch.mul(input_gate, cell_gate)
-        ht = torch.mul(output_gate, torch.tanh(ct))
-        ht = torch.mm(ht, self.weight_project.t())
-
-        return ht, (ht, ct)
-
-    def init_weights(self):
-        stdv = 1.0 / math.sqrt(self.hidden_size)
-
-        nn.init.uniform_(self.weight_xi, -stdv, stdv)
-        nn.init.uniform_(self.weight_xf, -stdv, stdv)
-        nn.init.uniform_(self.weight_xc, -stdv, stdv)
-        nn.init.uniform_(self.weight_xo, -stdv, stdv)
-
-        nn.init.uniform_(self.weight_hi, -stdv, stdv)
-        nn.init.uniform_(self.weight_hf, -stdv, stdv)
-        nn.init.uniform_(self.weight_hc, -stdv, stdv)
-        nn.init.uniform_(self.weight_ho, -stdv, stdv)
-
-        nn.init.uniform_(self.bias_xi, -stdv, stdv)
-        nn.init.uniform_(self.bias_xf, -stdv, stdv)
-        nn.init.uniform_(self.bias_xc, -stdv, stdv)
-        nn.init.uniform_(self.bias_xo, -stdv, stdv)
-
-        nn.init.uniform_(self.bias_hi, -stdv, stdv)
-        nn.init.uniform_(self.bias_hf, -stdv, stdv)
-        nn.init.uniform_(self.bias_hc, -stdv, stdv)
-        nn.init.uniform_(self.bias_ho, -stdv, stdv)
-
-        nn.init.uniform_(self.weight_project, -stdv, stdv)
-
-class LSTMPLayer(nn.Module):
-    
-    def __init__(self, input_size, hidden_size, projection_size):
-        super(LSTMPLayer, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.projection_size = projection_size
-        self.cell = LSTMPCell(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
-    
-    def forward(self, input, state):
-        outputs = []
-        for item in range(input.size()[0]):
-            out, state = self.cell(input[item],state)
-            outputs += [out]
-        return torch.stack(outputs, dim=0), state
 
 class Generator(nn.Module):
     #use official LSTMP
-    def __init__(self,input_size, hidden_size, projection_size):
+    def __init__(self,input_size, hidden_size, projection_size, batch_size = 8):
         super(Generator, self).__init__()
         self.num_layers = 2
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.batch_size = batch_size
         self.lstmp = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=self.num_layers, proj_size=projection_size)
 
     def forward(self,x):
-        output, (h,c) = self.lstmp(x)
-        return output
+        h_0 = torch.randn(self.num_layers, self.batch_size, self.input_size).cuda()
+        c_0 = torch.randn(self.num_layers, self.batch_size, self.hidden_size).cuda()
 
-class Generator_OUR(nn.Module):
-
-    def __init__(self, input_size, hidden_size, projection_size, state=None):
-        super(Generator, self).__init__()
-        self.LSTMPLayer1 = LSTMPLayer(input_size=input_size, hidden_size=hidden_size, projection_size=projection_size)
-        self.LSTMPLayer2 = LSTMPLayer(input_size=projection_size, hidden_size=hidden_size, projection_size=projection_size)
-        self.state = state
-
-    def forward(self, input):
-        #input:(timestep, batch_size, input_dimension)
-        output, state = self.LSTMPLayer1(input, self.state)
-        output, state = self.LSTMPLayer2(output, state)
-
-        #output:(timestep, batch_size, hidden_size)
+        output, (h,c) = self.lstmp(x, (h_0, c_0))
         return output
         
 class Discriminator_speaker(nn.Module):
@@ -217,11 +124,17 @@ class Discriminator_speaker(nn.Module):
         super(Discriminator_speaker, self).__init__()
         self.conv1 = nn.Conv2d(1, 64, 3, stride=1, padding='same')
         self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU()
+        self.relu1 = nn.ReLU()
+        self.relu2 = nn.ReLU()
+        self.relu3 = nn.ReLU()
+        self.relu4 = nn.ReLU()
+        self.relu5 = nn.ReLU()
         self.tanh = nn.Tanh()
+        #TODO need dorpout?
         self.maxpool1 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv2 = nn.Conv2d(64, 128, 3, stride=1, padding='same')
         self.bn2 = nn.BatchNorm2d(128)
+        self.dropout= nn.Dropout(p=0.2)
         self.maxpool2 = nn.MaxPool2d((2, 2), stride=(2, 2))
         self.conv3 = nn.Conv2d(128, 256, 3, stride=1, padding='same')
         self.bn3 = nn.BatchNorm2d(256)
@@ -235,11 +148,11 @@ class Discriminator_speaker(nn.Module):
         self.init_weights()
 
     def init_weights(self):
-        nn.init.xavier_uniform_(self.conv1.weight)
-        nn.init.xavier_uniform_(self.conv2.weight)
-        nn.init.xavier_uniform_(self.conv3.weight)
-        nn.init.xavier_uniform_(self.conv4.weight)
-        nn.init.xavier_uniform_(self.conv5.weight)
+        nn.init.xavier_uniform_(self.conv1.weight, gain= nn.init.calculate_gain('tanh'))
+        nn.init.xavier_uniform_(self.conv2.weight, gain= nn.init.calculate_gain('tanh'))
+        nn.init.xavier_uniform_(self.conv3.weight, gain= nn.init.calculate_gain('tanh'))
+        nn.init.xavier_uniform_(self.conv4.weight, gain= nn.init.calculate_gain('tanh'))
+        nn.init.xavier_uniform_(self.conv5.weight, gain= nn.init.calculate_gain('tanh'))
         nn.init.zeros_(self.conv1.bias)
         nn.init.zeros_(self.conv2.bias)
         nn.init.zeros_(self.conv3.bias)
@@ -259,16 +172,45 @@ class Discriminator_speaker(nn.Module):
         print (self.conv5.weight)
         #input: (batch_size, 1, timestep_width, height)
         #TODO find the best compose of relu and tanh.
-        output = self.tanh(self.bn1(self.conv1(x)))
+        output = self.conv1(x)
+        print ('output_conv1')
+        print (output.shape)
+        print (output)
+        output = self.tanh(output)
+        print ('output_tanh1')
+        print (output.shape)
+        print (output)
+        output = self.bn1(output)
+        print ('output_bn1')
+        print (output.shape)
+        print (output)
         output = self.maxpool1(output)
-        output = self.tanh(self.bn2(self.conv2(output)))
+        print ('output_maxpool1')
+        print (output)
+        output = self.bn2(self.tanh(self.conv2(output)))
+        print ('output_bn2')
+        print (output)
         output = self.maxpool2(output)
-        output = self.tanh(self.bn3(self.conv3(output)))
+        print ('output_maxpool2')
+        print (output)
+        output = self.bn3(self.tanh(self.conv3(output)))
+        print ('output_bn3')
+        print (output)
         output = self.maxpool3(output)
-        output = self.tanh(self.bn4(self.conv4(output)))
+        print ('output_maxpool3')
+        print (output)
+        output = self.bn4(self.tanh(self.conv4(output)))
+        print ('output_bn4')
+        print (output)
         output = self.maxpool4(output)
-        output = self.tanh(self.bn5(self.conv5(output)))
+        print ('output_maxpool4')
+        print (output)
+        output = self.bn5(self.tanh(self.conv5(output)))
+        print ('output_bn5')
+        print (output)
         output = self.avgpool(output)
+        print ('output_avgpool')
+        print (output)
         print ('-------------------')
         print ('Discriminator_speaker output.shape')
         output = output.reshape(-1,512)
@@ -366,19 +308,36 @@ class TripleLoss(nn.Module):
         super(TripleLoss, self).__init__()
         self.margin = margin # 阈值
         #self.rank_loss = nn.MarginRankingLoss(margin=margin)
-        #self.tripletloss = nn.TripletMarginLoss(margin=0.3, reduction='sum')
 
     def forward(self, inputs, labels, norm=False):      
+        #inputs should be normalized.
+        #inputs = normalize(inputs)
         dist_mat = self.cosine_dist(inputs, inputs)  # 距离矩阵,越大越相似。
-        dist_ap, dist_an = self.hard_sample(dist_mat, labels) # 取出每个anchor对应的hard sample.
-        loss = dist_an + self.margin - dist_ap
+        #dist_ap, dist_an = self.hard_sample(dist_mat, labels) # 取出每个anchor对应的hard sample.
+        #print ('TripleLoss loss1:') 
+        #print (loss)
+        #print ('dist_an:')
+        #print (dist_an)
+        #print ('dist_ap:')
+        #print (dist_ap)
         #loss = nn.functional.relu(loss)
-        loss = torch.sum(loss)
-        
-        return loss
+        #print ('TripleLoss loss2:') 
+        #print (loss)
+        #loss = torch.sum(loss)
+        #loss = dist_an + self.margin - dist_ap
+
+
+        id_ap, id_an = self.hard_sample(dist_mat, labels) # 取出每个anchor对应的hard sample.
+        print ('official id_ap:')
+        print (id_ap)
+        print ('official id_an:')
+        print (id_an)
+        #loss = self.official_tripletloss(inputs, inputs[id_ap], inputs[id_an])
+        #return loss
+        return inputs[id_ap], inputs[id_an]
 
     @staticmethod
-    def hard_sample( dist_mat, labels, ):
+    def hard_sample( dist_mat, labels):
         # 距离矩阵的尺寸是 (batch_size, batch_size)
         assert len(dist_mat.size()) == 2
         assert dist_mat.size(0) == dist_mat.size(1)
@@ -394,25 +353,44 @@ class TripleLoss(nn.Module):
         is_pos = labels.expand(N, N).eq(labels.expand(N, N).t()) # 两两组合， 取label相同的a-p
         for i in range(N):
             is_pos[i][i] = False
+
+        print ('TripleLoss dist_mat_ap init')
+        print (dist_mat_ap)
         for i in range(N):
-            for j in range(N):
-                if is_pos[i][j] == False:
-                    dist_mat_ap[i][j] = dist_mat_ap[i][j] + 2
+            dist_mat_ap[i][~is_pos[i]] = dist_mat_ap[i][~is_pos[i]] + 2
+        print ('TripleLoss dist_mat_ap changed')
+        print (dist_mat_ap)
         
-        list_ap = torch.amin(dist_mat_ap,1)
+        id_ap = torch.argmin(dist_mat_ap,1)
+        print ('list_ap position:')
+        print (id_ap)
+        #list_ap = torch.amin(dist_mat_ap,1)
+        #list_an = torch.amax(dist_mat_an,1)
+        #return list_ap, list_an
         
                 
         
         is_neg = labels.expand(N, N).ne(labels.expand(N, N).t()) # 两两组合， 取label不同的a-n
+        print ('TripleLoss dist_mat_an init')
+        print (dist_mat_an)
         for i in range(N):
-            for j in range(N):
-                if is_neg[i][j] == False:
-                    dist_mat_an[i][j] = dist_mat_an[i][j] - 2
+            #for hardest sample
+            #dist_mat_an[i][~is_neg[i]] = dist_mat_an[i][~is_eng[i]] - 2 
 
-        list_an = torch.amax(dist_mat_an,1)
+            #for easyest sample
+            dist_mat_an[i][~is_neg[i]] = dist_mat_an[i][~is_neg[i]] + 2 
+
+        print ('TripleLoss dist_mat_an changed')
+        print (dist_mat_an)
+
+        #TODO use hardest sample
+        #id_an = torch.argmax(dist_mat_an,1) #hardest sample
+        id_an = torch.argmin(dist_mat_an,1) #easyest sample
+        print ('list_an position:')
+        print (id_an)
         
         
-        return list_ap, list_an
+        return id_ap, id_an
 
     @staticmethod
     def normalize(x, axis=1):
@@ -420,22 +398,7 @@ class TripleLoss(nn.Module):
         return x
 
     @staticmethod
-    def euclidean_dist(x, y, norm=True):
-        if norm: #when vector is normalized, euclidean_dist is almost equal to cosine dist.
-            x = self.normalize(x)
-            y = self.normalize(y)
-        m, n = x.size(0), y.size(0)
-        xx = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(m, n)
-        yy = torch.pow(y, 2).sum(dim=1, keepdim=True).expand(n, m).t()
-        dist = xx + yy # 任意的两个样本组合， 求第二范数后求和 x^2 + y^2
-        dist.addmm_( 1, -2, x, y.t() ) # (x-y)^2 = x^2 + y^2 - 2xy
-        dist = dist.clamp(min=1e-12).sqrt() #开方
-        return dist
-
-    @staticmethod
     def cosine_dist(x, y):
-        x = normalize(x)
-        y = normalize(y)
         print ('compute cosine:')
         print (x)
         print (y)
@@ -448,54 +411,50 @@ def normalize(x, axis=1):
     return x
 
 def main(args):
-    num_classes = 20
-    batch_size = 8
-    lr_init = 0.02
-    epochs = 100
-    input_size = 64 
-    hidden_size = 128
-    projection_size = 64
+    num_classes = 7985
+    batch_size = args.batch_size
+    lr_init = args.lr
+    epochs = args.epochs
+    G_input_size = 64 
+    G_hidden_size = 128
+    G_projection_size = 64
     
     D1 = Discriminator_speaker().cuda()
     FC_D1 = FullyConnect_speaker(num_classes).cuda()
     D2 = Discriminator_channel().cuda()
     
-    ##example input & output
-    input = torch.randn(8, 500, 64, 1)
-    input = input.squeeze(dim=-1)
-    input = input.transpose(dim0=0, dim1=1)
-    hx = torch.randn(input.size(1), projection_size, requires_grad=False).cuda()
-    cx = torch.randn(input.size(1), hidden_size, requires_grad=False).cuda()
-    state = [hx, cx]
-    #G = Generator(input_size, hidden_size, projection_size, state=state).cuda()
-    G = Generator(input_size, hidden_size, projection_size).cuda()
+    G = Generator(G_input_size, G_hidden_size, G_projection_size, batch_size = batch_size).cuda()
     
     #for data unbalanced . train_demo.xls. librispeech 10, xinshen 10.
-    classes_weight = torch.Tensor([0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.0550, 0.0075, 0.0189, 0.1211, 0.0378, 0.0108, 0.1514, 0.2018, 0.0075, 0.0144]).cuda()
-    Class_CrossEntropyLoss = nn.CrossEntropyLoss(weight=classes_weight)
+    #classes_weight = torch.Tensor([0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.3027, 0.0550, 0.0075, 0.0189, 0.1211, 0.0378, 0.0108, 0.1514, 0.2018, 0.0075, 0.0144]).cuda()
+    classes_weight = torch.Tensor([0.0193, 0.0176, 0.0192, 0.0218, 0.0179, 0.0177, 0.0200, 0.0176, 0.0183, 0.0186, 0.0172, 0.0178, 0.0156, 0.0179, 0.0165, 0.0181, 0.0189, 0.0171, 0.0183, 0.0192, 0.0190, 0.0179, 0.0177, 0.0177, 0.0199, 0.0171, 0.0171, 0.0199, 0.0183, 0.0207, 0.0191, 0.0192, 0.0183, 0.0176, 0.0190, 0.0192, 0.0179, 0.0189, 0.0189, 0.0183, 0.0194, 0.0210, 0.0191, 0.0190, 0.0197, 0.0192, 0.0185, 0.0192, 0.0186, 0.0176, 0.0200, 0.0193, 0.0181, 0.0190, 0.0187, 0.0194, 0.0191, 0.0210, 0.0183, 0.0178, 0.0190, 0.0183, 0.0180, 0.0178, 0.0176, 0.0181, 0.0176, 0.0181, 0.0172, 0.0189, 0.0181, 0.0189, 0.0188, 0.0178, 0.0184, 0.0179, 0.0176, 0.0190, 0.0176, 0.0177, 0.0174, 0.0181, 0.0192, 0.0185, 0.0183, 0.0185, 0.0186, 0.0198, 0.0189, 0.0183, 0.0192, 0.0183, 0.0195, 0.0178, 0.0175, 0.0183, 0.0193, 0.0197, 0.0173, 0.0170, 0.0181, 0.0183, 0.0186, 0.0176, 0.0193, 0.0187, 0.0191, 0.0189, 0.0183, 0.0179, 0.0179, 0.0179, 0.0176, 0.0171, 0.0171, 0.0180, 0.0180, 0.0171, 0.0175, 0.0178, 0.0175, 0.0173, 0.0195, 0.0172, 0.0174, 0.0187, 0.0180, 0.0178, 0.0174, 0.0173, 0.0181, 0.0171, 0.0173, 0.0204, 0.0187, 0.0183, 0.0189, 0.0181, 0.0177, 0.0173, 0.0173, 0.0173, 0.0176, 0.0176, 0.0181, 0.0179, 0.0172, 0.0177, 0.0177, 0.0178, 0.0178, 0.0182, 0.0181, 0.0179, 0.0176, 0.0182, 0.0173, 0.0173, 0.0179, 0.0183, 0.0174, 0.0181, 0.0177, 0.0176, 0.0183, 0.0202, 0.0193, 0.0183, 0.0170, 0.0181, 0.0181, 0.0168, 0.0170, 0.0185, 0.0177, 0.0175, 0.0176, 0.0183, 0.0177, 0.0174, 0.0187, 0.0178, 0.0181, 0.0180, 0.0176, 0.0167, 0.0179, 0.0172, 0.0163, 0.0183, 0.0168, 0.0178, 0.0181, 0.0185, 0.0177, 0.0176, 0.0181, 0.0171, 0.0177, 0.0181, 0.0193, 0.0175, 0.0175, 0.0179, 0.0178, 0.0183, 0.0176, 0.0183, 0.0182, 0.0184, 0.0161, 0.0180, 0.0176, 0.0176, 0.0174, 0.0181, 0.0193, 0.0179, 0.0181, 0.0183, 0.0189, 0.0200, 0.0188, 0.0181, 0.0174, 0.0178, 0.0171, 0.0170, 0.0176, 0.0176, 0.0183, 0.0181, 0.0171, 0.0171, 0.0167, 0.0171, 0.0183, 0.0178, 0.0178, 0.0176, 0.0193, 0.0183, 0.0183, 0.0176, 0.0185, 0.0181, 0.0177, 0.0193, 0.0203, 0.0183, 0.0179, 0.0171, 0.0181, 0.0191, 0.0157, 0.0172, 0.0176, 0.0176, 0.0177, 0.0179, 0.0165, 0.0171, 0.0169, 0.0170, 0.0173, 0.0168, 0.0191, 0.0173, 0.0196, 0.0176, 0.0189, 0.0179, 0.0177, 0.0174, 0.0174, 0.0184, 0.0180, 0.0158, 0.0173, 0.0174, 0.0168, 0.0170, 0.0180, 0.0173, 0.0181, 0.0187, 0.0178, 0.0173, 0.0171, 0.0174, 0.0178, 0.0171, 0.0170, 0.0170, 0.0173, 0.0192, 0.0198, 0.0170, 0.0183, 0.0167, 0.0181, 0.0177, 0.0185, 0.0189, 0.0264, 0.0166, 0.0172, 0.0173, 0.0158, 0.0181, 0.0176, 0.0179, 0.0177, 0.0170, 0.0173, 0.0174, 0.0168, 0.0177, 0.0180, 0.0183, 0.0171, 0.0171, 0.0174, 0.0177, 0.0183, 0.0175, 0.0177, 0.0166, 0.0167, 0.0171, 0.0173, 0.0176, 0.0185, 0.0177, 0.0168, 0.0172, 0.0173, 0.0198, 0.0178, 0.0166, 0.0176, 0.0168, 0.0176, 0.0180, 0.0185, 0.0173, 0.0205, 0.0179, 0.0178, 0.0179, 0.0176, 0.0183, 0.0180, 0.0177, 0.0178, 0.0173, 0.0186, 0.0171, 0.0177, 0.0178, 0.0174, 0.0179, 0.0174, 0.0188, 0.0184, 0.0190, 0.0173, 0.0178, 0.0177, 0.0181, 0.0171, 0.0178, 0.0170, 0.0171, 0.0178, 0.0178, 0.0165, 0.0173, 0.0163, 0.0169, 0.5555, 0.625, 0.0961, 0.3333, 0.4545, 0.7142, 0.625, 0.7142, 1.0, 0.8333, 0.5, 0.3846, 0.2173, 0.2272, 0.2, 0.5, 0.4166, 0.625, 0.3846, 1.0, 1.0, 0.625, 0.4545, 0.4166, 0.4545, 0.7142, 1.0, 0.5, 0.25, 0.7142, 0.625, 0.5, 0.625, 1.25, 0.2941, 0.3125, 0.4545, 0.3846, 1.0, 1.0, 0.625, 0.5, 0.625, 0.4166, 0.8333, 0.2272, 0.2380, 0.625, 0.25, 0.1785, 0.4166, 0.625, 0.625, 0.625, 0.625, 0.1666, 1.25, 0.7142, 0.625, 0.8333, 0.125, 1.0, 0.3125, 0.2173, 0.625, 0.7142, 0.625, 0.5555, 0.4166, 0.1020, 0.7142, 0.8333, 0.25, 0.625, 0.7142, 0.5555, 0.2083, 0.625, 0.7142, 0.5555, 0.7142, 0.5, 0.8333, 0.25, 0.4545, 0.0568, 0.4166, 0.2941, 0.2083, 0.625, 0.625, 0.5555, 0.625, 0.1063, 0.7142, 0.625, 0.25, 0.7142, 0.2777, 0.4166, 0.5555, 0.0793, 0.1724, 0.625, 0.25, 0.625, 0.4545, 0.4166, 0.4166, 0.5555, 0.5555, 0.7142, 0.8333, 0.3125, 0.2083, 0.4166, 0.3125, 0.3571, 0.4166, 0.625, 0.3333, 0.625, 0.2941, 0.3571, 0.7142, 0.625, 0.8333, 0.5555, 0.0819, 0.2083, 0.4545, 0.3571, 0.625, 0.8333, 0.3125, 0.2777, 0.5555, 0.7142, 0.625, 0.1136, 0.4545, 0.625, 0.7142, 0.2, 0.625, 0.0595, 0.625, 0.5, 0.2380, 0.4166, 0.625, 0.8333, 0.3846, 0.625, 0.3571, 0.625, 0.5555, 0.625, 0.2083, 0.2941, 0.3333, 0.1724, 0.625, 0.8333, 0.7142, 1.25, 0.4166, 0.4166, 0.4545, 0.8333, 0.4166, 0.8333, 1.25, 0.1388, 0.2380, 0.2941, 0.2083, 0.4166, 0.0714, 1.25, 0.3846, 0.2083, 0.2083, 0.625, 0.3846, 0.2083, 0.7142, 0.625, 0.625, 0.3846, 0.2777, 0.4545, 0.625, 0.7142, 0.1923, 0.8333, 0.3571, 0.7142, 0.3571, 0.625, 0.3333, 0.625, 0.625, 0.5555, 0.8333, 0.2941, 0.5, 0.1219, 0.2941, 0.0735, 0.5555, 0.1282, 0.3125, 0.4166, 0.2380, 1.25, 0.4166, 0.2, 0.8333, 0.625, 0.2941, 0.2631, 0.4545, 0.2777, 1.25, 0.8333, 0.625, 0.2631, 0.5555, 0.1562, 0.3571, 0.2173, 0.3333, 0.7142, 0.8333, 1.0, 0.3125, 0.5555, 0.4545, 0.3846, 0.3846, 0.625, 0.3571, 0.625, 0.2272, 0.3846, 0.1562, 0.3571, 0.5, 0.4545, 0.3333, 0.8333, 0.1785, 1.25, 0.4166, 0.5555, 0.625, 0.625, 0.5, 0.4166, 1.25, 0.5, 0.3125, 0.5555, 0.2272, 0.2941, 0.7142, 1.0, 0.625, 0.3571, 0.5555, 0.625, 0.625, 0.625, 0.625, 1.25, 0.8333, 0.2380, 0.8333, 0.3125, 0.625, 1.0, 0.625, 0.1724, 0.5, 0.625, 0.0757, 0.1666, 0.625, 0.625, 0.625, 0.5555, 0.5, 0.0819, 0.8333, 0.2777, 0.4166, 0.8333, 0.5, 0.2941, 0.1851, 0.3125, 0.7142, 0.8333, 0.2941, 0.4166, 0.1562, 0.625, 0.1515, 0.625, 0.7142, 0.5, 0.625, 0.2941, 0.5, 0.3125, 0.2380, 0.1666, 0.2777, 0.2083, 0.7142, 0.625, 0.3125, 0.7142, 0.5, 0.1515, 0.1562, 0.4545, 1.25, 0.1612, 0.8333, 0.8333, 0.3125, 0.2941, 0.1923, 0.625, 0.4545, 0.5555, 0.3571, 0.5555, 0.4545, 0.4166, 0.5555, 0.625, 0.5555, 0.8333, 0.125, 0.4166, 0.625, 0.625, 0.625, 0.4166, 0.2173, 0.5555, 0.3846, 0.5, 0.4545, 0.1562, 0.625, 0.5, 0.7142, 1.0, 0.1724, 0.3333, 1.0, 0.1282, 0.1428, 0.3125, 0.25, 0.4166, 0.25, 0.1315, 0.25, 0.4166, 0.4545, 0.5555, 0.625, 0.3571, 0.8333, 0.625, 0.625, 0.3125, 0.7142, 0.1515, 0.4545, 0.5, 0.3571, 0.1388, 0.25, 0.4166, 1.25, 0.7142, 0.625, 0.0943, 0.5, 0.7142, 0.7142, 0.7142, 0.1388, 0.5, 0.0877, 0.25, 0.625, 0.7142, 0.625, 0.4166, 0.1612, 0.3333, 0.625, 0.3125, 0.8333, 1.0, 0.625, 0.8333, 0.7142, 0.7142, 0.3333, 0.2380, 0.2941, 0.3125, 0.7142, 0.5555, 0.8333, 0.2083, 0.25, 0.1470, 1.25, 0.8333, 0.3571, 0.5, 0.7142, 0.1666, 0.1190, 0.1063, 0.3571, 0.4545, 0.5, 0.3571, 0.0847, 0.4166, 0.4166, 0.2631, 0.8333, 0.7142, 0.7142, 0.25, 0.625, 0.7142, 0.625, 0.5555, 0.5, 0.1562, 0.3125, 0.625, 0.5555, 0.2941, 0.2380, 0.5, 0.3333, 0.1282, 0.4166, 0.625, 0.625, 0.2380, 0.7142, 0.625, 0.0595, 0.1315, 0.2631, 0.3125, 0.625, 0.1724, 0.1785, 0.4166, 0.625, 0.625, 0.2380, 0.1428, 0.3846, 0.7142, 0.2777, 0.1111, 0.1785, 1.25, 0.0833, 1.25, 1.0, 0.5, 0.4166, 0.8333, 0.8333, 0.2380, 0.8333, 0.8333, 0.625, 0.4545, 0.625, 0.8333, 0.3333, 0.4166, 0.3846, 0.1666, 0.1351, 0.625, 0.5, 0.2, 1.0, 0.8333, 0.3571, 0.625, 0.2380, 0.8333, 0.8333, 0.3846, 0.8333, 0.3125, 0.625, 0.2083, 0.2, 0.5555, 0.5555, 0.2941, 0.5, 1.25, 0.2777, 0.2, 0.0980, 0.5, 0.8333, 0.8333, 1.0, 0.3125, 0.8333, 0.3571, 0.5, 0.3125, 0.7142, 0.5, 0.625, 0.1666, 0.7142, 1.25, 0.5555, 0.1351, 0.625, 0.4545, 0.4166, 1.25, 0.625, 0.7142, 0.625, 0.25, 0.3125, 0.1562, 1.0, 1.25, 0.1470, 0.7142, 0.5, 0.7142, 1.0, 0.7142, 0.625, 1.0, 1.0, 0.625, 0.625, 0.5, 0.1562, 0.625, 0.8333, 0.2380, 0.7142, 0.8333, 0.3571, 0.625, 0.5555, 0.4166, 0.625, 0.4545, 1.25, 0.1785, 0.625, 0.25, 1.0, 0.3333, 0.625, 0.3125, 0.625, 0.7142, 0.7142, 0.4166, 0.5, 0.4166, 0.4545, 0.625, 0.3125, 0.3571, 0.5555, 0.2631, 0.5, 0.5555, 0.7142, 0.4166, 0.1351, 0.4166, 0.125, 0.4166, 0.5555, 0.0909, 0.4545, 0.2083, 0.8333, 0.1351, 0.625, 0.625, 0.4545, 0.1351, 0.2272, 0.8333, 0.5555, 0.3333, 0.625, 0.2083, 0.5, 1.0, 0.4545, 0.25, 0.2777, 0.2941, 0.625, 1.0, 0.7142, 0.625, 0.3333, 0.4545, 0.25, 0.2631, 0.4545, 0.8333, 0.4166, 0.3125, 0.3125, 0.5, 0.2941, 0.625, 0.7142, 0.625, 0.8333, 0.1724, 0.3125, 0.7142, 0.25, 0.8333, 0.5, 0.4545, 0.625, 0.2941, 0.3125, 0.3333, 0.2941, 0.8333, 0.7142, 0.7142, 0.5, 0.1851, 0.5555, 0.625, 0.7142, 0.0892, 1.0, 0.1785, 0.5555, 0.2941, 0.7142, 0.4166, 0.2, 0.625, 0.625, 0.2631, 0.3846, 0.5, 0.5, 0.7142, 0.625, 0.4166, 0.3571, 0.7142, 0.5555, 0.4545, 0.1351, 0.3125, 0.5, 0.625, 0.2631, 0.25, 0.25, 0.5, 0.1515, 0.2941, 0.2, 0.5, 0.2380, 0.4545, 0.3333, 0.5555, 0.4545, 0.7142, 0.0781, 0.625, 0.5, 0.0980, 0.1724, 0.8333, 0.8333, 0.4545, 0.4166, 0.4545, 0.3125, 0.8333, 0.3333, 0.7142, 0.4545, 0.625, 0.1315, 0.3846, 0.5555, 0.625, 0.8333, 0.8333, 0.2777, 0.4166, 0.5555, 0.3125, 0.625, 0.5555, 0.7142, 1.0, 0.5, 0.3125, 0.1612, 0.625, 0.5555, 0.4166, 1.25, 0.2777, 0.4545, 0.25, 0.625, 0.4166, 0.3571, 0.1923, 0.5, 0.7142, 1.0, 0.25, 0.8333, 0.4545, 0.4545, 0.3125, 1.0, 0.2941, 0.0609, 0.625, 1.25, 0.2083, 0.3333, 0.625, 0.1785, 0.25, 1.25, 1.25, 0.3125, 0.625, 0.1351, 0.3125, 0.3571, 1.0, 0.1162, 0.3571, 0.1923, 1.0, 0.7142, 0.625, 0.3571, 0.4545, 0.2083, 0.7142, 0.4545, 0.2777, 1.25, 0.4166, 0.4166, 0.2631, 0.8333, 0.7142, 0.7142, 0.4545, 0.3846, 0.3571, 0.2, 0.2083, 0.2631, 0.625, 0.4545, 0.625, 0.3125, 0.4166, 0.8333, 0.625, 0.7142, 0.3571, 0.1041, 0.4545, 0.2941, 0.2631, 0.4545, 0.7142, 0.4166, 0.625, 0.3846, 1.25, 0.5, 0.5, 0.625, 0.4545, 0.5, 0.5, 0.7142, 0.8333, 0.8333, 0.8333, 1.0, 0.5, 0.625, 0.7142, 0.3125, 0.625, 0.3571, 0.4166, 0.3125, 0.5, 0.625, 0.2631, 0.8333, 0.5555, 0.5, 0.1612, 0.7142, 0.8333, 0.625, 0.1923, 0.3846, 0.1724, 0.25, 0.625, 0.2083, 0.7142, 0.4166, 1.0, 0.625, 0.4545, 0.0714, 0.625, 1.0, 0.3125, 0.7142, 0.625, 0.4166, 0.625, 0.5555, 0.0847, 0.8333, 1.0, 0.2631, 1.0, 0.625, 0.3333, 1.0, 0.8333, 0.2083, 0.5555, 0.7142, 0.1063, 0.2380, 0.4166, 0.4166, 0.8333, 0.2272, 0.4166, 0.4545, 0.625, 0.5, 0.625, 0.2083, 0.3125, 0.1515, 0.5, 0.5555, 1.0, 0.3571, 0.2380, 0.8333, 0.8333, 0.4545, 0.8333, 0.2777, 0.3333, 0.3571, 0.625, 0.7142, 0.5, 0.625, 0.625, 0.5555, 0.625, 0.4166, 0.625, 0.3571, 0.7142, 0.1612, 0.125, 0.625, 0.8333, 0.625, 0.7142, 0.2941, 0.625, 0.625, 0.4166, 0.2380, 0.7142, 0.3125, 0.1162, 0.625, 0.2631, 0.4545, 0.625, 0.7142, 0.8333, 0.2941, 0.1666, 0.3333, 0.1282, 0.625, 0.5, 0.625, 0.4166, 0.7142, 0.625, 0.2, 0.5555, 0.4166, 0.5, 0.8333, 0.625, 0.2173, 0.625, 0.8333, 0.625, 0.1851, 0.625, 0.7142, 0.0595, 0.5, 0.8333, 0.8333, 0.3125, 1.25, 0.625, 0.625, 0.1162, 0.5, 0.625, 0.8333, 0.3846, 0.8333, 0.0549, 0.8333, 0.3846, 0.4166, 0.5, 0.625, 0.7142, 0.5, 0.7142, 0.2941, 0.5, 0.3333, 0.4166, 0.3333, 0.3571, 0.5555, 0.3846, 0.1562, 0.5555, 0.1612, 0.5, 0.5, 0.1785, 0.4166, 0.5555, 0.4545, 0.3125, 0.4166, 0.4166, 1.0, 0.1923, 0.625, 0.3846, 1.0, 0.25, 0.7142, 0.625, 0.625, 0.4545, 0.3846, 0.2777, 0.1785, 0.7142, 0.625, 1.0, 0.3333, 0.8333, 0.1219, 0.5, 1.25, 0.3125, 0.2631, 0.3846, 0.3333, 0.8333, 0.4545, 0.5555, 0.4166, 0.625, 0.625, 0.2941, 0.2083, 0.2, 0.0657, 0.0602, 0.3846, 0.1086, 0.1785, 0.7142, 0.5555, 0.8333, 0.8333, 0.0724, 0.625, 1.25, 0.4166, 0.1785, 0.5555, 0.1136, 0.4166, 0.7142, 0.625, 0.4545, 0.5, 0.7142, 0.8333, 0.2631, 0.5555, 0.8333, 0.625, 0.8333, 0.3846, 0.7142, 0.625, 0.1724, 0.3333, 0.5555, 0.3125, 0.625, 0.625, 0.1724, 0.25, 0.7142, 0.2941, 0.1923, 0.8333, 0.1562, 0.8333, 1.25, 0.625, 0.5555, 0.3333, 0.5, 0.625, 0.2083, 0.4166, 0.625, 0.3571, 0.1851, 1.0, 1.0, 0.8333, 0.4166, 0.625, 0.5555, 0.625, 0.5, 0.3846, 0.3846, 0.3125, 0.5555, 0.8333, 0.1136, 0.7142, 1.25, 0.8333, 0.7142, 0.1724, 0.5555, 0.8333, 0.2380, 0.8333, 0.3571, 0.2083, 0.8333, 0.625, 0.4166, 0.1388, 0.4545, 1.25, 0.5, 0.1923, 0.625, 1.0, 0.8333, 0.3333, 0.8333, 0.625, 0.2941, 0.625, 1.0, 0.5, 0.7142, 1.0, 0.4166, 0.8333, 0.8333, 0.7142, 0.3571, 0.25, 0.3125, 0.25, 0.4166, 0.7142, 0.2083, 0.4166, 0.4545, 0.625, 0.3846, 0.7142, 1.25, 0.4545, 0.25, 0.3125, 0.625, 0.5555, 0.3333, 1.25, 0.5, 0.4166, 0.7142, 0.5, 0.625, 0.8333, 0.4545, 0.2941, 0.3846, 0.8333, 0.1724, 0.625, 1.0, 0.2941, 0.5555, 0.2631, 0.3846, 0.5555, 0.4545, 0.4166, 0.5555, 0.1020, 0.2777, 0.625, 0.625, 0.625, 0.4545, 0.1851, 0.1470, 0.4166, 1.0, 0.7142, 0.4545, 0.2631, 0.3846, 0.8333, 0.625, 0.4545, 1.25, 0.8333, 0.3125, 0.7142, 0.1612, 0.4545, 0.5555, 0.3846, 0.625, 0.625, 0.4545, 0.7142, 0.3125, 0.8333, 0.3846, 0.7142, 0.3333, 0.3571, 0.2631, 0.625, 0.625, 0.1785, 1.0, 0.3846, 0.625, 0.4166, 0.8333, 0.7142, 0.2380, 1.25, 0.5555, 0.3125, 1.0, 0.7142, 0.7142, 0.1351, 0.625, 0.625, 0.625, 0.7142, 0.0892, 0.3125, 0.8333, 0.25, 0.5, 0.3846, 0.1063, 0.3125, 0.1562, 0.625, 0.8333, 0.625, 0.4545, 1.0, 0.625, 0.7142, 0.3571, 1.0, 0.5555, 0.625, 0.7142, 0.4166, 0.3125, 0.7142, 0.625, 0.625, 0.2173, 0.2941, 0.5555, 0.1785, 1.0, 0.1923, 0.3571, 0.7142, 0.3846, 0.625, 0.2083, 0.7142, 0.1923, 0.8333, 0.5, 0.2083, 1.0, 0.2941, 0.8333, 0.4166, 0.7142, 0.7142, 0.5555, 0.4166, 0.3125, 0.3333, 0.4545, 0.1562, 1.25, 0.625, 0.4166, 0.5555, 0.4166, 0.8333, 0.2777, 0.7142, 0.625, 0.25, 0.3125, 0.5, 1.0, 0.2272, 0.7142, 0.4166, 0.3846, 0.7142, 0.7142, 0.625, 0.4545, 0.4166, 0.2777, 0.4545, 0.625, 0.4166, 0.8333, 0.4545, 0.25, 0.7142, 0.3846, 0.4545, 0.2380, 0.3125, 0.7142, 0.7142, 0.8333, 0.625, 0.1785, 0.8333, 0.4545, 0.3571, 0.2941, 0.7142, 0.7142, 0.3846, 0.8333, 0.5, 0.5, 0.3125, 0.4545, 0.8333, 0.4166, 0.1388, 0.8333, 0.2777, 0.3571, 0.2272, 0.625, 0.2380, 1.0, 0.8333, 0.1923, 0.0961, 1.0, 1.0, 0.8333, 0.5555, 0.8333, 0.7142, 0.4166, 1.25, 0.8333, 0.2272, 0.4545, 0.625, 1.0, 0.7142, 0.2941, 0.2, 0.3571, 0.3125, 0.25, 0.5555, 0.4545, 0.5, 0.2631, 0.7142, 0.4166, 0.625, 0.625, 0.625, 0.7142, 0.3125, 0.2631, 0.8333, 0.125, 0.1351, 0.4166, 0.4166, 0.4166, 0.4545, 0.3125, 0.3571, 0.4166, 0.3846, 0.625, 0.3571, 0.625, 0.625, 0.4545, 0.1388, 0.2631, 0.2272, 0.2173, 0.7142, 0.5, 0.7142, 0.625, 0.2, 0.5, 0.7142, 0.3125, 0.8333, 0.5555, 0.625, 0.8333, 0.7142, 0.1136, 1.0, 0.2083, 0.8333, 0.4545, 0.625, 0.7142, 0.625, 0.4166, 1.0, 0.7142, 0.7142, 0.5, 1.25, 0.3125, 0.625, 1.25, 0.4166, 0.7142, 0.2, 0.625, 0.2941, 0.2631, 0.1666, 0.625, 0.625, 0.7142, 0.8333, 0.4166, 0.5555, 0.8333, 0.125, 0.8333, 0.3571, 0.5, 0.4545, 0.625, 0.3333, 0.1923, 0.625, 0.2083, 0.3846, 0.625, 0.625, 0.625, 0.8333, 0.2941, 0.8333, 0.3125, 0.7142, 0.3571, 0.625, 0.1724, 0.7142, 0.5555, 0.3125, 0.625, 0.8333, 0.3125, 0.1785, 0.5555, 0.5, 0.8333, 1.0, 0.625, 0.625, 0.0431, 0.4545, 0.2083, 0.1923, 0.5, 0.1785, 0.8333, 0.2173, 0.7142, 0.7142, 0.8333, 0.8333, 0.8333, 0.5555, 0.625, 1.0, 0.3333, 0.1785, 1.25, 0.4166, 1.0, 1.0, 0.8333, 0.1923, 0.4166, 0.1351, 0.5555, 0.625, 0.2777, 0.5555, 0.2, 0.8333, 0.8333, 1.25, 0.625, 0.2272, 1.0, 0.25, 0.625, 0.1020, 1.0, 0.3125, 0.1020, 1.0, 0.7142, 0.0847, 0.5, 1.0, 0.5, 0.625, 0.625, 0.625, 0.4166, 0.7142, 0.8333, 0.2777, 0.3333, 0.625, 0.5555, 0.8333, 0.125, 0.7142, 0.625, 0.3125, 0.5, 0.4166, 0.5, 0.8333, 0.5, 0.7142, 0.8333, 0.2083, 0.4545, 0.1612, 0.8333, 0.625, 1.0, 0.5555, 0.1388, 0.625, 0.0735, 0.3846, 0.625, 0.625, 0.3125, 0.625, 0.1086, 0.1515, 0.3125, 0.2777, 0.5, 0.625, 0.3846, 0.2941, 0.3846, 0.7142, 0.4545, 0.1666, 0.0367, 0.0490, 0.3333, 0.2380, 0.625, 0.3125, 0.5, 1.0, 0.25, 1.0, 0.7142, 0.3125, 1.0, 1.0, 0.8333, 0.8333, 0.5555, 0.625, 1.0, 1.0, 0.4166, 0.1562, 0.2941, 0.4166, 0.7142, 0.8333, 0.2272, 0.2941, 0.2631, 0.2380, 0.625, 0.0925, 0.4166, 0.7142, 0.2941, 0.4545, 0.5555, 0.7142, 0.8333, 0.625, 0.3846, 0.8333, 0.3571, 0.3125, 0.5555, 0.625, 0.1785, 0.2777, 0.0961, 0.625, 0.7142, 0.5, 0.0390, 0.8333, 0.7142, 0.125, 1.0, 0.4166, 0.5555, 0.4166, 0.625, 0.8333, 0.4545, 0.4545, 0.8333, 0.4166, 0.3571, 0.7142, 0.0568, 0.3571, 0.3333, 0.7142, 0.2777, 0.3333, 0.8333, 0.4166, 0.4545, 0.8333, 0.5555, 0.4545, 0.7142, 0.7142, 0.4166, 0.7142, 0.3125, 0.625, 0.3571, 0.5, 0.4166, 0.5, 0.3846, 0.7142, 0.625, 0.2941, 0.8333, 0.3125, 0.4545, 0.7142, 0.25, 0.8333, 0.2941, 0.2941, 0.5555, 0.8333, 0.7142, 0.0793, 0.5, 0.1923, 0.3846, 0.4545, 1.0, 0.7142, 0.5, 0.7142, 0.3333, 0.2631, 0.625, 0.5, 0.3571, 1.0, 1.25, 1.25, 0.1470, 0.1282, 1.25, 0.4166, 0.8333, 0.2272, 0.8333, 0.5555, 0.8333, 0.5, 0.8333, 0.7142, 0.25, 0.3846, 0.125, 0.7142, 0.5, 0.625, 0.4166, 1.25, 0.5555, 0.5555, 0.625, 0.8333, 0.4545, 0.2777, 0.3571, 0.7142, 0.4166, 0.1666, 0.625, 0.1724, 0.7142, 0.4166, 0.3125, 0.3846, 0.4545, 0.5, 0.4166, 0.3846, 0.3571, 0.25, 0.625, 0.5, 0.7142, 0.1851, 1.0, 0.625, 0.4545, 0.625, 0.3125, 0.7142, 0.4545, 0.5, 0.5, 0.8333, 0.2777, 0.25, 0.625, 0.3333, 0.4545, 0.2380, 0.5, 0.8333, 0.8333, 0.0549, 0.8333, 0.1785, 0.3333, 1.0, 0.2941, 0.625, 0.2, 1.25, 0.625, 0.625, 0.5, 1.0, 0.625, 0.1666, 0.4166, 0.4166, 0.8333, 0.5, 0.3846, 0.5555, 0.625, 0.4545, 0.7142, 0.4545, 0.2173, 0.4166, 0.8333, 0.5, 1.0, 0.7142, 0.3125, 0.1923, 0.4545, 0.4166, 0.4166, 0.2083, 0.625, 0.8333, 0.5555, 0.3333, 0.3125, 0.3333, 0.625, 0.7142, 0.4166, 0.5, 0.4545, 0.1785, 0.8333, 0.7142, 0.0847, 0.7142, 1.25, 0.625, 0.625, 1.0, 0.625, 0.2083, 0.4166, 0.5555, 0.7142, 0.4166, 0.1111, 0.25, 0.5, 0.2, 0.5555, 0.625, 0.25, 0.3125, 0.4545, 0.7142, 0.625, 0.3846, 0.7142, 0.7142, 0.4166, 0.5, 0.2380, 0.0657, 0.625, 0.4166, 0.625, 0.3571, 0.5555, 0.1162, 0.2173, 0.4166, 0.7142, 0.8333, 0.5555, 1.25, 1.0, 0.5555, 0.5, 0.7142, 0.3571, 1.25, 0.625, 0.7142, 0.625, 0.3333, 0.625, 0.2941, 0.2173, 0.25, 0.3571, 0.7142, 0.5555, 0.8333, 0.8333, 0.3571, 0.1562, 0.4166, 0.5, 0.7142, 0.7142, 0.625, 0.3333, 0.8333, 0.3333, 0.5555, 0.625, 0.5555, 0.4545, 0.8333, 0.8333, 1.0, 1.25, 1.0, 0.4545, 1.25, 0.2631, 1.25, 1.25, 1.0, 0.4545, 0.8333, 1.0, 1.25, 0.625, 0.625, 0.625, 1.25, 1.0, 1.25, 1.0, 0.8333, 0.625, 0.625, 0.8333, 0.4166, 1.0, 0.4166, 0.1785, 0.7142, 0.7142, 0.4545, 0.1282, 0.625, 0.2272, 0.1785, 0.8333, 0.8333, 0.625, 0.625, 0.3571, 0.3125, 0.25, 0.3333, 0.4166, 1.25, 0.1923, 0.0943, 0.2941, 0.4166, 0.4166, 0.3333, 0.3125, 0.625, 0.3333, 0.4166, 0.8333, 0.2, 0.3125, 0.8333, 0.4166, 0.7142, 0.8333, 0.5, 0.4166, 0.25, 0.625, 0.625, 0.625, 0.4166, 0.625, 0.3333, 0.3846, 0.625, 0.1219, 0.2777, 0.2272, 0.2272, 0.2777, 0.625, 0.5555, 0.625, 0.5, 0.2380, 0.3333, 0.5, 0.0588, 0.3846, 0.3125, 0.8333, 0.4166, 0.5, 0.1923, 0.4166, 0.3846, 0.3846, 0.625, 0.1562, 0.625, 0.5555, 0.625, 0.8333, 0.1785, 0.625, 0.5555, 0.8333, 0.2083, 0.4166, 0.625, 0.25, 0.3333, 0.4166, 0.25, 0.1785, 0.4545, 0.7142, 0.0961, 0.7142, 0.5, 0.8333, 0.5, 0.5555, 0.3333, 0.2631, 0.3125, 1.0, 0.5, 0.7142, 1.0, 0.625, 1.0, 0.4545, 0.5555, 0.2941, 0.4545, 0.125, 0.3571, 0.5555, 0.5555, 0.7142, 1.25, 0.4166, 0.4545, 0.5555, 0.8333, 0.7142, 0.2631, 0.3125, 1.0, 0.4545, 0.3125, 0.1785, 0.3125, 0.7142, 0.1562, 0.25, 0.625, 0.7142, 0.5555, 0.3571, 0.1162, 0.3846, 0.625, 0.625, 0.1923, 1.25, 0.4166, 1.0, 0.5555, 0.5555, 0.5555, 0.625, 0.2083, 1.25, 0.2380, 0.7142, 0.4545, 1.25, 0.2777, 1.0, 0.5555, 0.3125, 0.625, 0.2, 0.7142, 0.25, 0.5555, 0.5555, 0.4166, 0.4166, 0.2173, 0.5, 0.3846, 0.2380, 0.3125, 0.1851, 0.625, 1.0, 0.4166, 0.625, 0.1785, 0.7142, 0.3333, 0.1351, 0.3846, 0.4545, 0.3333, 0.4166, 0.7142, 0.625, 0.3846, 0.8333, 1.0, 1.0, 1.25, 0.3571, 0.8333, 0.8333, 0.2083, 0.2083, 0.5, 0.5555, 0.625, 0.4166, 0.2173, 0.5555, 1.0, 0.1666, 0.625, 0.1388, 0.3125, 0.1785, 0.8333, 0.5, 0.5, 0.3333, 0.4166, 0.625, 0.1785, 0.3846, 0.4545, 0.8333, 0.2380, 0.1785, 0.5555, 0.8333, 0.8333, 0.625, 0.4545, 0.8333, 0.2631, 0.1470, 0.25, 0.4166, 0.7142, 0.3333, 0.2631, 0.5, 0.3571, 0.625, 0.625, 0.1562, 0.3125, 0.5, 0.1162, 0.7142, 0.5555, 0.3333, 0.625, 0.7142, 0.3571, 0.3125, 0.625, 1.0, 0.5, 0.3333, 0.7142, 0.4166, 0.8333, 0.2941, 0.2777, 0.5555, 0.8333, 0.1282, 1.0, 0.625, 0.4166, 0.4166, 1.25, 0.8333, 0.7142, 0.5555, 0.5555, 0.2941, 0.3333, 0.625, 1.25, 1.0, 1.0, 0.8333, 0.4166, 0.625, 0.5, 0.5555, 0.8333, 0.5, 0.2631, 0.5555, 0.2380, 0.3333, 0.3125, 0.8333, 1.25, 0.5, 0.4166, 0.5555, 1.0, 0.1470, 1.0, 0.3846, 0.3571, 0.5, 0.0625, 0.625, 0.7142, 0.7142, 0.8333, 0.5, 0.4166, 0.4545, 1.0, 0.4166, 0.5555, 1.0, 0.4166, 0.5, 0.3571, 0.5555, 0.1785, 0.8333, 0.4166, 0.7142, 0.4545, 0.5, 0.7142, 0.7142, 0.5, 0.625, 0.4166, 0.625, 0.0961, 0.5555, 0.5555, 0.1136, 0.8333, 0.7142, 0.625, 0.625, 0.3846, 0.125, 0.7142, 0.7142, 0.7142, 0.625, 0.7142, 0.4545, 0.2777, 0.25, 0.625, 0.8333, 0.2777, 0.7142, 0.3846, 0.3846, 0.4545, 0.4545, 0.8333, 0.3846, 0.625, 0.5555, 0.625, 0.25, 0.2083, 0.3333, 0.7142, 0.0925, 0.3571, 1.25, 0.7142, 0.625, 0.3125, 1.0, 0.5555, 1.0, 0.8333, 0.0304, 0.8333, 0.2380, 0.4166, 1.25, 0.625, 0.7142, 0.7142, 0.4545, 0.2941, 0.1923, 0.3571, 0.4166, 0.3846, 0.8333, 1.0, 0.7142, 0.3333, 0.2272, 0.2631, 0.5555, 0.3333, 0.625, 0.625, 1.25, 0.3333, 0.4166, 0.4166, 0.0862, 0.2777, 0.3125, 0.625, 0.2941, 1.0, 0.7142, 0.0892, 0.625, 0.4545, 0.2, 0.1785, 0.4166, 0.625, 1.0, 0.4166, 0.2941, 1.0, 0.8333, 1.0, 0.25, 0.7142, 0.0961, 0.4545, 0.3125, 0.3846, 0.625, 0.8333, 0.5, 0.4166, 0.8333, 0.1515, 0.7142, 0.4166, 0.2083, 0.125, 0.4545, 0.2777, 1.25, 0.2272, 0.8333, 0.7142, 0.8333, 0.25, 1.0, 0.2173, 0.2380, 0.625, 1.0, 0.4166, 0.1562, 0.125, 0.25, 0.4545, 0.3571, 1.25, 0.625, 0.4545, 0.5, 0.4545, 0.4166, 0.5555, 1.0, 0.8333, 0.8333, 0.25, 0.7142, 1.0, 0.4166, 0.7142, 0.7142, 0.625, 0.3571, 0.3125, 0.4166, 1.25, 0.625, 0.5, 0.2083, 1.0, 0.4166, 0.7142, 0.4166, 0.8333, 0.3125, 0.625, 0.8333, 0.25, 0.7142, 0.5555, 0.2272, 0.3125, 0.1785, 0.3125, 0.4545, 0.0704, 0.8333, 0.4545, 0.3125, 0.5555, 0.625, 0.5555, 0.7142, 0.4545, 0.625, 0.4166, 0.1515, 0.625, 0.625, 1.0, 0.625, 0.4545, 0.25, 1.0, 0.4166, 0.25, 0.5, 1.25, 0.7142, 0.7142, 0.4545, 1.0, 0.0357, 0.3125, 0.3846, 0.2083, 0.4166, 1.25, 0.625, 0.25, 0.4166, 0.5, 1.25, 0.1136, 0.625, 0.625, 0.5555, 0.2380, 0.3846, 0.7142, 0.7142, 0.8333, 0.2380, 0.7142, 0.3333, 0.625, 0.1851, 0.1190, 0.8333, 0.0485, 0.625, 0.5555, 0.625, 0.1351, 0.3333, 0.5555, 0.4166, 0.4166, 0.7142, 0.5555, 0.5, 0.2, 0.8333, 0.5, 0.8333, 0.5, 0.4166, 0.7142, 0.8333, 0.1923, 0.7142, 0.3846, 0.1923, 0.3333, 0.0675, 0.1612, 0.7142, 0.2941, 0.3333, 0.625, 0.2173, 0.4545, 0.4166, 0.625, 0.3125, 0.4545, 0.2380, 0.4545, 0.8333, 0.1851, 0.2777, 0.625, 0.4545, 0.3125, 0.4166, 0.3125, 0.5, 0.1515, 0.4166, 0.1041, 0.1136, 0.625, 0.2941, 0.625, 0.5555, 0.8333, 0.625, 0.4166, 0.5555, 0.8333, 0.4166, 0.4166, 0.5, 0.7142, 0.625, 0.25, 0.4166, 0.3846, 0.5555, 0.8333, 0.625, 0.4166, 0.8333, 0.4545, 0.7142, 1.0, 0.5555, 0.7142, 0.3125, 0.1562, 0.8333, 1.25, 0.1428, 1.0, 0.2380, 0.7142, 0.4166, 0.3571, 1.0, 0.3846, 0.8333, 0.1785, 0.7142, 0.625, 0.0746, 0.5, 0.1612, 0.3846, 0.7142, 0.3846, 0.1351, 0.8333, 0.3571, 1.0, 0.1190, 0.2941, 0.2777, 0.2272, 0.4166, 0.0892, 1.25, 0.4166, 0.8333, 0.3571, 0.5555, 0.3125, 0.625, 0.7142, 0.4166, 1.25, 0.4545, 0.3125, 0.4545, 0.625, 0.625, 0.4166, 0.3846, 0.4166, 0.2941, 0.1388, 0.8333, 0.3571, 0.125, 0.5, 0.8333, 0.1785, 0.7142, 0.7142, 0.8333, 0.2380, 0.8333, 0.4545, 0.7142, 0.625, 0.2083, 0.8333, 0.625, 0.5, 0.5, 0.3571, 0.8333, 0.8333, 0.625, 0.625, 0.4166, 0.3571, 1.0, 0.7142, 0.7142, 0.5, 0.2777, 0.4166, 0.1785, 0.7142, 0.625, 0.4166, 0.3125, 0.625, 0.8333, 0.5, 0.3846, 0.3333, 0.3125, 0.5555, 0.5, 0.5, 0.625, 0.3333, 0.2083, 0.625, 0.4166, 0.5, 0.1282, 0.625, 0.2941, 0.3846, 0.4545, 0.1351, 0.625, 0.625, 0.7142, 0.3333, 0.5555, 1.25, 0.625, 0.1562, 0.5555, 0.5, 0.4166, 0.5, 0.2777, 0.7142, 0.8333, 0.2083, 1.0, 0.625, 0.2941, 0.5555, 0.7142, 0.625, 0.625, 0.2380, 0.2083, 0.625, 0.625, 0.2777, 0.2380, 0.4545, 0.625, 0.5555, 1.0, 0.4166, 0.2631, 1.25, 0.7142, 0.625, 0.3125, 0.1388, 0.4166, 0.3333, 0.4166, 0.25, 0.3333, 0.4166, 0.3125, 0.3571, 0.4166, 0.625, 0.625, 0.625, 0.1612, 0.5555, 0.625, 0.625, 0.4545, 0.1562, 0.7142, 0.5, 0.1111, 0.3846, 0.8333, 0.2083, 0.4166, 0.8333, 0.4166, 0.1666, 0.2380, 0.8333, 0.3846, 0.625, 0.3571, 0.625, 0.5, 0.0724, 0.625, 0.5, 0.5555, 1.0, 0.1785, 0.5, 0.8333, 0.5, 0.4545, 0.4166, 0.625, 0.625, 0.5, 0.625, 0.3571, 0.7142, 0.1785, 0.625, 0.25, 1.0, 0.7142, 0.7142, 0.3333, 0.625, 0.2777, 0.4545, 0.625, 0.7142, 0.5555, 0.2380, 0.625, 0.3125, 0.8333, 0.3125, 0.5, 0.4545, 0.5, 0.3571, 0.3846, 0.3846, 0.625, 0.5555, 0.625, 0.4166, 0.4545, 0.625, 0.5, 0.7142, 0.5555, 0.625, 0.2777, 0.1923, 0.4545, 0.625, 0.5, 0.5, 0.625, 0.1428, 0.1923, 0.4166, 0.5555, 0.25, 0.3125, 0.625, 0.25, 0.3125, 0.5555, 0.5555, 0.2777, 0.5, 0.5, 0.8333, 0.1162, 0.4545, 0.3125, 0.8333, 0.3846, 0.4545, 0.5555, 0.1388, 0.8333, 0.25, 0.1111, 0.625, 0.1724, 0.7142, 0.625, 0.3846, 0.4166, 0.4166, 0.1, 0.4166, 0.2631, 0.8333, 0.625, 0.8333, 0.625, 0.5555, 0.3571, 0.5, 0.7142, 0.625, 0.7142, 0.3846, 0.7142, 0.5555, 0.0781, 0.7142, 0.625, 0.3125, 0.7142, 0.3846, 0.8333, 0.4545, 0.2631, 0.7142, 0.8333, 0.7142, 0.4545, 0.3333, 1.0, 1.25, 0.5, 0.2631, 0.3846, 0.625, 0.2083, 0.7142, 0.7142, 0.5555, 0.8333, 0.4545, 0.4166, 0.7142, 0.25, 1.0, 0.4166, 0.3571, 0.4166, 0.4166, 0.625, 1.0, 0.2173, 0.5, 0.5555, 0.5, 0.625, 0.2777, 0.2, 0.5555, 0.625, 0.5555, 0.625, 0.625, 0.4166, 0.625, 0.5, 0.4166, 0.8333, 0.1388, 1.25, 0.4166, 1.25, 0.625, 0.625, 1.0, 0.7142, 0.8333, 0.1851, 0.5, 0.2941, 0.625, 0.4166, 0.5555, 0.4166, 0.2173, 0.5555, 0.1162, 0.7142, 0.3333, 0.8333, 0.1562, 0.7142, 0.4166, 0.3125, 0.3846, 1.25, 0.625, 0.3125, 0.1785, 0.625, 0.4166, 0.7142, 0.3333, 0.2941, 0.3846, 0.2272, 0.3571, 1.0, 0.8333, 0.625, 0.2777, 0.05, 0.8333, 0.5555, 0.5, 0.2173, 0.25, 0.8333, 0.4545, 0.8333, 0.3125, 0.1666, 0.2631, 0.4166, 0.625, 0.2083, 0.625, 0.8333, 0.8333, 0.4166, 0.5, 0.8333, 0.625, 0.3333, 0.2777, 0.4166, 0.3333, 0.7142, 0.3125, 0.2380, 0.625, 0.3333, 0.0609, 0.7142, 0.625, 0.8333, 0.4166, 0.8333, 0.1428, 0.7142, 0.4545, 0.8333, 0.4545, 0.4545, 0.0704, 0.625, 0.2631, 0.8333, 0.4545, 0.8333, 0.1315, 0.2777, 0.4545, 0.625, 0.3571, 0.4545, 0.4166, 0.7142, 0.5555, 0.3125, 1.0, 0.4166, 0.4166, 0.5, 0.4545, 0.5, 1.0, 0.2777, 0.4166, 0.625, 0.1785, 0.8333, 0.8333, 0.4545, 0.4166, 0.5, 0.625, 0.1428, 0.625, 0.25, 1.0, 0.7142, 0.3125, 0.2941, 0.625, 0.7142, 0.625, 0.0943, 0.7142, 0.7142, 0.625, 0.5555, 0.7142, 0.2083, 0.1136, 0.2941, 0.7142, 0.3333, 0.625, 0.8333, 0.625, 0.7142, 0.4166, 0.625, 0.4166, 1.0, 0.5555, 0.5, 0.5, 0.4545, 0.5555, 1.25, 0.5555, 0.1086, 0.5, 0.2631, 0.1136, 0.0434, 0.5555, 0.2173, 0.2380, 0.8333, 0.3125, 0.4166, 0.3333, 0.7142, 1.0, 0.625, 0.3333, 0.4166, 0.5, 0.2631, 1.0, 0.3846, 0.4545, 0.625, 0.8333, 0.4545, 0.8333, 0.625, 0.25, 0.4545, 0.1785, 1.0, 0.3125, 0.2941, 0.625, 0.25, 0.3846, 0.2, 0.4545, 0.625, 0.3333, 0.1562, 0.3571, 0.4545, 1.25, 0.1851, 0.8333, 0.7142, 0.625, 0.625, 0.5, 1.0, 0.5555, 0.8333, 0.5, 0.4545, 0.625, 0.25, 0.5, 0.1428, 1.0, 1.25, 0.625, 1.0, 0.1515, 0.4166, 0.5, 1.0, 0.1086, 0.125, 0.4545, 0.3125, 0.8333, 0.3846, 0.8333, 0.2380, 0.3125, 0.0704, 0.625, 0.8333, 0.25, 0.2777, 0.25, 0.625, 0.3846, 0.5, 0.1063, 0.625, 0.2, 0.8333, 0.5555, 0.2173, 0.625, 0.3571, 0.4166, 0.2631, 0.625, 0.7142, 0.4166, 0.2631, 0.7142, 0.625, 1.25, 0.1923, 0.625, 0.1851, 0.1724, 0.4545, 0.1190, 0.1785, 0.3846, 0.1923, 0.7142, 0.7142, 0.3333, 0.3333, 0.3333, 0.8333, 0.7142, 0.3846, 0.625, 0.8333, 1.25, 1.0, 0.1612, 0.2083, 0.125, 0.25, 0.7142, 0.5, 0.7142, 0.2173, 0.7142, 0.625, 0.625, 0.2631, 0.5555, 0.7142, 0.2941, 0.3333, 0.8333, 1.0, 0.8333, 0.2083, 0.3125, 0.625, 0.3125, 0.5555, 0.8333, 0.3125, 0.2, 0.625, 0.1923, 0.1785, 0.4166, 0.2173, 0.1612, 0.8333, 0.3125, 0.5555, 0.1136, 0.625, 0.5555, 0.3571, 0.4545, 0.5555, 0.7142, 0.3571, 0.7142, 1.0, 1.0, 0.1724, 0.8333, 0.2083, 0.2, 0.4545, 0.625, 0.2777, 0.7142, 0.3846, 0.1219, 0.5, 0.0704, 0.4166, 0.0568, 0.5, 0.0862, 0.3846, 0.4545, 1.0, 0.5555, 0.625, 0.8333, 0.8333, 0.625, 1.0, 0.1923, 0.5555, 0.625, 0.4545, 0.625, 0.625, 0.8333, 0.7142, 0.4166, 0.5555, 0.2631, 0.625, 0.625, 0.4545, 0.1351, 0.5, 0.625, 0.7142, 0.3846, 0.2272, 0.4545, 0.1785, 0.4166, 0.625, 0.5, 0.5555, 0.7142, 0.5, 0.2083, 0.625, 0.3571, 0.4166, 1.25, 0.625, 0.7142, 0.8333, 0.3333, 0.3846, 0.7142, 0.5555, 0.3846, 0.3846, 1.0, 0.625, 0.4166, 1.25, 0.3571, 0.5, 0.1041, 0.7142, 0.5, 0.625, 0.1, 0.7142, 0.5555, 0.3125, 1.25, 0.2380, 0.3571, 0.1315, 0.2777, 0.625, 0.8333, 1.25, 1.25, 0.5, 1.0, 0.7142, 0.625, 0.3125, 0.4166, 0.3571, 0.3125, 0.4166, 0.4545, 0.25, 0.625, 0.625, 0.4166, 0.8333, 0.625, 0.625, 0.25, 0.4166, 0.625, 0.625, 0.4545, 0.4545, 0.5, 0.1785, 0.7142, 0.8333, 0.7142, 0.625, 0.8333, 0.3571, 0.3846, 0.4166, 0.2083, 0.5, 0.8333, 0.25, 1.25, 0.4166, 0.7142, 0.625, 0.7142, 0.7142, 0.1351, 0.3333, 0.3125, 0.1785, 0.4166, 0.5, 0.3125, 0.4166, 0.8333, 0.25, 0.2272, 0.3333, 0.3125, 0.8333, 1.0, 0.625, 0.8333, 0.8333, 0.3125, 0.7142, 0.8333, 0.2631, 0.2631, 0.5, 0.4166, 0.4545, 0.7142, 0.7142, 0.7142, 0.625, 0.2631, 0.625, 0.8333, 0.2631, 0.4166, 0.4545, 0.125, 0.3846, 0.0943, 0.2083, 0.5, 0.2380, 0.625, 0.625, 0.8333, 0.8333, 0.5, 0.625, 1.0, 0.625, 0.4166, 0.625, 0.5555, 1.0, 0.5555, 0.1851, 0.4166, 0.3846, 0.1785, 0.625, 1.25, 0.3125, 0.3333, 0.1923, 0.8333, 0.25, 0.625, 0.625, 0.3333, 0.5555, 0.8333, 0.3846, 0.3846, 0.7142, 0.7142, 0.3846, 0.4166, 1.0, 0.2380, 0.3571, 0.625, 0.1851, 0.625, 0.7142, 0.625, 0.7142, 0.8333, 0.625, 0.2777, 0.625, 0.4166, 0.3125, 0.8333, 0.625, 0.625, 0.3125, 0.3846, 1.0, 0.25, 0.25, 0.4166, 0.625, 0.2777, 0.625, 0.625, 0.625, 0.625, 0.4166, 0.4166, 0.3571, 0.7142, 0.5, 0.125, 0.7142, 0.25, 0.4166, 0.1785, 0.625, 0.2777, 0.625, 0.5555, 0.4166, 0.7142, 0.8333, 0.7142, 0.625, 0.25, 0.5, 0.2380, 0.5555, 0.3571, 0.625, 0.7142, 0.8333, 0.5555, 0.3125, 0.8333, 0.7142, 0.5, 0.4545, 1.0, 0.5, 0.3846, 0.7142, 0.625, 1.0, 0.5555, 0.7142, 1.0, 0.7142, 0.625, 0.8333, 0.25, 0.625, 0.25, 0.25, 0.3846, 0.3333, 0.1785, 0.3846, 0.8333, 0.8333, 0.4545, 0.5, 0.3125, 0.625, 0.625, 0.5555, 1.25, 0.3333, 0.4545, 0.4545, 0.2941, 0.4166, 0.3125, 0.2083, 0.4166, 0.2272, 0.4545, 0.625, 0.3846, 0.625, 0.7142, 0.7142, 0.5555, 0.2631, 0.7142, 0.5, 0.2631, 0.4166, 0.7142, 0.1612, 0.8333, 0.3846, 0.625, 0.4166, 0.5555, 0.5555, 0.2777, 0.8333, 0.4166, 0.2380, 0.3333, 0.8333, 0.4545, 0.2, 0.625, 0.5555, 0.4166, 0.8333, 0.4545, 0.3333, 0.7142, 0.3125, 0.3571, 0.8333, 0.3846, 0.4545, 0.5, 0.2777, 0.7142, 0.25, 0.5, 0.3571, 0.2777, 0.2631, 0.3333, 0.5, 0.2380, 0.7142, 0.25, 0.2, 0.7142, 0.4166, 0.625, 0.2777, 0.625, 0.8333, 0.4545, 0.7142, 0.7142, 0.5, 0.625, 0.4166, 0.8333, 0.2380, 0.3125, 1.0, 0.3333, 0.8333, 0.3846, 0.4166, 0.3846, 0.2941, 0.1724, 0.4166, 0.625, 0.625, 0.625, 0.0381, 0.5555, 1.0, 0.625, 0.5555, 1.0, 0.3333, 0.1162, 0.25, 1.0, 0.3846, 0.8333, 0.3125, 0.4545, 0.2631, 0.4166, 1.0, 0.8333, 0.7142, 0.1612, 0.2083, 0.625, 0.625, 0.5555, 0.3125, 0.625, 0.3571, 1.25, 0.8333, 1.0, 0.7142, 0.2941, 0.4166, 0.4166, 0.7142, 1.0, 0.5, 0.2272, 0.7142, 0.3571, 0.3571, 0.3333, 0.2631, 0.4545, 0.5, 0.2631, 1.25, 0.2083, 0.2941, 0.2272, 0.8333, 0.4545, 0.7142, 0.7142, 0.5, 0.1612, 0.625, 1.25, 0.4166, 0.25, 0.8333, 0.5555, 0.625, 0.3846, 0.625, 1.25, 1.0, 0.625, 0.5, 0.2380, 0.3333, 0.7142, 0.2777, 0.5, 0.4166, 0.7142, 0.8333, 0.3846, 0.625, 1.0, 0.3846, 0.625, 0.2941, 0.625, 0.7142, 1.0, 0.25, 0.4166, 0.3125, 0.4545, 0.4545, 0.2380, 0.625, 0.4166, 0.1851, 0.5, 0.0625, 0.7142, 0.0543, 0.625, 0.4545, 0.625, 0.625, 0.5555, 0.5555, 0.4166, 0.625, 0.1562, 0.7142, 0.625, 0.2272, 0.8333, 0.625, 0.8333, 0.25, 0.5555, 1.25, 1.25, 0.0666, 0.4166, 0.4545, 0.3846, 1.0, 0.5555, 1.25, 0.5, 0.3571, 0.1923, 0.625, 1.0, 0.4545, 0.4545, 0.1470, 0.7142, 0.0295, 0.2777, 0.5, 0.2631, 0.7142, 0.5555, 0.8333, 1.0, 0.8333, 0.5555, 0.625, 0.4545, 0.3571, 0.2777, 0.2941, 0.2173, 0.5, 0.4545, 0.3125, 0.7142, 0.5555, 0.3333, 0.2, 0.8333, 0.7142, 0.5, 0.8333, 1.25, 0.8333, 0.7142, 0.2380, 0.25, 0.4166, 1.0, 0.4166, 0.25, 0.2380, 0.1923, 0.3846, 0.1724, 0.4545, 1.0, 0.8333, 0.625, 0.7142, 0.8333, 0.5555, 0.8333, 0.7142, 0.3846, 0.3125, 0.625, 0.7142, 0.8333, 0.5555, 0.2777, 0.2777, 0.5555, 0.7142, 1.0, 0.5555, 0.7142, 0.2631, 0.4545, 0.3125, 0.5555, 1.0, 1.0, 0.0862, 0.625, 0.7142, 0.3333, 0.5, 0.625, 0.25, 1.25, 1.0, 0.3846, 0.2631, 0.625, 0.7142, 0.0793, 0.8333, 0.5, 0.3333, 0.1351, 0.4545, 0.1785, 0.7142, 0.8333, 0.3125, 1.0, 0.8333, 0.625, 0.5, 0.0961, 0.2631, 0.1388, 0.4166, 0.1666, 0.5555, 0.625, 0.8333, 0.4166, 0.3125, 0.625, 0.25, 0.2083, 0.1282, 1.25, 1.0, 0.0649, 0.7142, 0.625, 0.4166, 0.3571, 1.25, 0.7142, 0.7142, 0.8333, 0.625, 0.1282, 0.5, 0.2, 0.625, 1.25, 0.2941, 0.7142, 0.5555, 0.3571, 0.4545, 0.7142, 0.7142, 0.3333, 0.4166, 0.625, 0.5555, 1.25, 0.25, 0.8333, 1.0, 0.5555, 0.1562, 0.4545, 0.4545, 1.25, 0.2631, 0.625, 0.7142, 1.0, 0.625, 0.4545, 0.3125, 0.2777, 0.5, 0.3333, 0.8333, 0.8333, 0.2272, 0.4545, 1.25, 0.3846, 0.2941, 0.625, 0.1388, 0.7142, 0.4545, 0.25, 0.3846, 0.4166, 0.8333, 0.2777, 0.7142, 0.8333, 0.8333, 0.625, 0.8333, 0.3846, 0.625, 0.3125, 0.4545, 0.1724, 0.3125, 0.1666, 0.625, 0.8333, 0.625, 0.4166, 1.0, 0.625, 0.7142, 0.625, 0.1785, 0.2631, 0.7142, 0.4166, 0.7142, 0.5555, 0.3125, 0.2941, 0.7142, 0.625, 0.3571, 0.8333, 1.0, 0.7142, 0.4545, 0.1785, 0.3571, 0.2173, 0.2941, 0.3571, 0.7142, 0.8333, 0.25, 1.25, 0.5555, 1.0, 1.0, 1.0, 0.8333, 1.0, 1.0, 1.25, 1.25, 1.25, 1.25, 0.7142, 1.0, 0.8333, 1.25, 0.625, 0.5, 1.0, 0.8333, 1.25, 1.25, 1.0, 0.8333, 1.25, 0.4545, 1.0, 1.0, 1.25, 0.8333, 0.625, 0.7142, 0.0892, 0.5, 0.25, 0.7142, 0.4166, 0.1515, 0.0833, 0.4545, 0.625, 1.25, 0.7142, 0.4545, 0.4166, 0.5, 0.2631, 0.625, 0.2631, 0.4545, 0.3333, 1.25, 0.8333, 0.2083, 0.4545, 0.4166, 0.3125, 0.7142, 0.2083, 0.2941, 0.8333, 0.4545, 0.2631, 0.625, 0.625, 0.625, 0.1785, 0.8333, 0.4166, 0.7142, 0.5555, 0.8333, 1.0, 0.3125, 0.7142, 0.3571, 0.1612, 0.4545, 0.8333, 0.8333, 0.3571, 0.4545, 0.8333, 0.625, 0.1612, 0.7142, 0.5, 0.5, 0.7142, 0.8333, 0.8333, 0.625, 0.1515, 0.3125, 0.3571, 0.3571, 0.2941, 0.3846, 0.2777, 0.625, 0.3571, 0.8333, 0.3571, 0.3571, 0.1785, 0.8333, 0.625, 0.1041, 0.7142, 0.8333, 0.8333, 0.3333, 0.4166, 0.4545, 0.625, 0.3333, 0.3333, 0.625, 0.3333, 0.3333, 1.25, 0.2083, 0.3571, 0.125, 0.625, 0.8333, 0.3571, 0.5555, 0.4166, 0.4166, 0.5555, 1.0, 0.8333, 1.0, 0.2941, 0.1, 0.7142, 0.3333, 0.7142, 0.4545, 1.0, 0.2777, 0.3846, 0.3571, 0.1785, 0.3125, 0.4545, 0.625, 0.7142, 1.0, 0.625, 0.7142, 0.2173, 0.1470, 0.4166, 0.2941, 0.5555, 0.2380, 0.625, 0.625, 0.2173, 0.2083, 0.5555, 1.25, 0.4166, 0.2083, 0.2380, 0.1785, 0.3846, 0.8333, 0.5555, 0.5555, 0.25, 0.8333, 0.7142, 0.5, 0.1785, 0.3125, 0.2083, 0.2631, 0.5555, 0.625, 0.625, 0.4545, 0.3333, 0.8333, 0.7142, 0.8333, 0.2631, 0.8333, 0.2, 0.1470, 0.1041, 0.4545, 0.25, 0.5, 0.5555, 0.2272, 0.7142, 0.7142, 0.1562, 0.625, 0.5555, 0.8333, 0.2777, 0.3125, 0.7142, 0.4545, 1.25, 0.5, 0.8333, 0.625, 0.4166, 0.2, 0.7142, 0.8333, 1.0, 0.4166, 0.5, 0.1282, 0.625, 0.2380, 0.4545, 0.625, 0.8333, 0.625, 0.7142, 1.0, 0.1515, 0.625, 0.5555, 0.625, 0.7142, 0.7142, 0.3125, 0.5555, 0.5, 0.1562, 0.4166, 0.4166, 0.3571, 0.5555, 0.2, 0.2631, 0.8333, 0.3125, 0.25, 0.3846, 0.4166, 0.625, 0.4166, 1.0, 0.3333, 0.5, 0.3125, 0.625, 0.1785, 0.5555, 0.625, 0.1428, 0.8333, 0.2083, 0.5555, 1.0, 0.625, 0.1724, 0.8333, 0.625, 0.1388, 0.4166, 0.1785, 0.3333, 0.5, 0.1388, 0.625, 0.2083, 0.3125, 0.8333, 0.625, 0.7142, 0.5, 1.25, 0.8333, 1.25, 0.8333, 0.625, 0.3125, 0.2941, 0.8333, 0.3125, 1.0, 0.8333, 0.3571, 0.1428, 0.7142, 0.3571, 0.1851, 0.2272, 0.4545, 0.3125, 0.2941, 0.625, 0.1351, 0.3571, 0.7142, 0.4545, 0.625, 0.4545, 0.7142, 0.4166, 1.0, 0.7142, 0.1923, 0.5, 0.625, 0.3846, 0.3125, 0.2631, 1.0, 1.0, 0.7142, 0.7142, 0.5, 0.3125, 0.625, 0.2941, 0.0378, 0.3125, 0.1923, 0.5555, 0.4545, 0.5555, 0.3571, 0.5555, 0.0925, 1.0, 0.7142, 0.625, 1.0, 0.8333, 0.2631, 0.7142, 0.0595, 0.2631, 0.25, 0.7142, 0.5555, 0.8333, 0.625, 0.3571, 0.4166, 0.2777, 0.625, 0.1388, 0.625, 0.1562, 0.8333, 1.25, 0.2777, 0.8333, 0.5555, 0.2941, 0.5, 0.2941, 0.1162, 0.8333, 0.25, 0.8333, 0.625, 0.2173, 0.0909, 0.4545, 0.625, 0.5555, 0.4166, 0.7142, 0.8333, 0.4166, 0.8333, 0.4166, 0.7142, 0.625, 0.625, 0.7142, 0.625, 0.625, 0.8333, 0.625, 0.8333, 0.3571, 0.625, 0.4166, 0.4545, 0.4166, 0.625, 1.0, 0.2380, 0.625, 0.5555, 0.8333, 0.5, 0.625, 0.3846, 0.625, 0.7142, 0.2083, 0.8333, 0.2, 0.3846, 0.5555, 0.8333, 0.8333, 0.4166, 0.2173, 0.25, 0.4166, 0.5, 0.3846, 0.2083, 0.625, 1.0, 0.4545, 0.2083, 0.5555, 0.625, 0.7142, 0.2380, 0.2631, 0.125, 0.1851, 0.3333, 0.3333, 0.4166, 0.4545, 0.3846, 0.3125, 0.2777, 0.5, 0.8333, 0.3125, 0.2380, 0.3125, 0.2083, 0.25, 0.5555, 0.2272, 0.625, 0.7142, 1.25, 0.1785, 0.8333, 0.1562, 0.8333, 0.5555, 0.5555, 0.1428, 0.625, 1.0, 0.5, 0.625, 0.7142, 0.5555, 0.3846, 0.4166, 0.8333, 0.4166, 1.0, 0.8333, 1.0, 0.5555, 0.7142, 0.3846, 0.5555, 0.5, 0.5, 1.25, 0.4166, 0.625, 0.7142, 0.8333, 0.5, 0.8333, 0.3846, 0.1666, 0.2941, 0.4166, 0.625, 0.25, 0.4166, 0.2777, 0.8333, 0.5, 0.7142, 0.5555, 0.5555, 1.0, 0.4166, 0.25, 0.8333, 0.25, 0.7142, 0.625, 0.625, 0.2631, 0.2173, 0.4166, 0.7142, 0.0684, 0.7142, 1.0, 0.4166, 0.3571, 0.2173, 0.5555, 0.625, 0.7142, 0.2083, 0.625, 0.5, 0.5555, 0.4166, 0.3846, 0.8333, 0.625, 1.0, 0.625, 0.5, 0.4166, 0.7142, 0.4166, 0.7142, 0.3125, 0.625, 1.0, 0.5, 0.8333, 0.8333, 0.2941, 0.625, 0.8333, 0.3571, 0.3125, 1.0, 0.7142, 0.2631, 0.2777, 0.2272, 0.1470, 1.25, 0.5555, 0.3846, 0.3125, 0.2631, 0.4545, 1.0, 0.3125, 0.25, 0.25, 1.25, 0.7142, 0.2631, 0.8333, 0.4166, 0.8333, 0.3333, 0.5, 0.7142, 0.4545, 0.1190, 0.5, 1.25, 0.8333, 0.3125, 0.3125, 0.2272, 0.4166, 0.3846, 0.4166, 0.2083, 0.625, 0.4545, 0.8333, 0.4545, 0.3571, 0.8333, 0.2272, 0.4545, 0.5, 1.0, 0.7142, 0.0806, 0.5555, 0.1515, 0.7142, 1.0, 0.5555, 0.5, 0.7142, 0.3125, 0.625, 0.2631, 1.25, 0.0675, 0.4545, 0.4166, 0.3333, 0.1851, 0.7142, 0.1851, 0.4166, 0.4545, 0.5, 0.1351, 1.0, 0.5, 0.5, 0.5, 0.625, 0.7142, 0.5555, 0.4166, 0.625, 0.625, 0.8333, 0.5555, 0.2631, 0.625, 0.5555, 0.1923, 0.4166, 0.2380, 0.625, 0.8333, 0.3125, 0.7142, 1.25, 0.5, 0.8333, 0.8333, 0.5, 0.3846, 0.8333, 0.4166, 0.4545, 0.5555, 0.625, 1.25, 0.5, 0.3846, 0.5, 0.625, 0.2777, 0.3571, 0.5555, 0.7142, 0.25, 0.5555, 0.4166, 0.7142, 0.3333, 0.1562, 0.2272, 0.625, 0.8333, 0.5555, 0.1041, 0.0641, 1.0, 0.2777, 0.4166, 0.8333, 0.5555, 0.1612, 0.625, 0.3125, 0.25, 0.25, 0.7142, 0.625, 0.625, 0.0694, 0.4545, 0.8333, 0.2380, 0.5555, 0.4545, 0.4545, 0.4166, 0.4166, 0.1020, 0.8333, 0.2631, 0.5555, 0.7142, 0.8333, 0.2380, 0.625, 0.7142, 0.625, 0.3571, 0.4545, 0.8333, 0.8333, 0.5, 0.8333, 0.5555, 0.625, 0.2777, 0.5555, 0.7142, 0.625, 0.4166, 0.25, 0.1923, 1.25, 1.25, 0.3333, 0.25, 0.625, 0.625, 1.0, 0.4166, 0.4545, 0.3571, 1.0, 0.7142, 0.5, 0.2083, 0.5555, 0.1428, 0.7142, 0.4166, 0.4545, 0.5, 0.4166, 0.5555, 0.8333, 0.3571, 0.4166, 0.7142, 0.3125, 0.4545, 0.625, 0.7142, 0.625, 1.0, 0.0510, 0.625, 0.7142, 0.1562, 0.2272, 0.625, 0.3333, 0.8333, 0.7142, 0.4166, 0.625, 0.625, 1.25, 0.25, 0.4545, 1.25, 0.25, 0.8333, 0.625, 0.4545, 0.7142, 0.2083, 0.5555, 0.7142, 0.3571, 0.4545, 0.5555, 0.1666, 0.3571, 0.2941, 0.2272, 1.0, 0.8333, 0.5555, 0.625, 0.3125, 0.5555, 0.4166, 0.5555, 0.4545, 0.625, 0.4545, 0.625, 0.0980, 0.7142, 0.4166, 0.1388, 1.0, 0.5555, 0.8333, 0.1923, 0.8333, 0.625, 0.625, 0.4166, 0.3846, 0.5555, 1.25, 0.625, 0.625, 0.1562, 0.2083, 0.3846, 0.2631, 0.625, 0.8333, 0.3333, 1.25, 0.2380, 0.4545, 0.625, 0.5555, 0.4166, 0.8333, 0.2272, 0.8333, 0.2173, 0.2941, 0.625, 0.8333, 0.625, 1.25, 0.625, 0.8333, 0.2083, 0.1219, 0.1388, 0.2380, 0.4166, 0.3846, 0.625, 0.5, 0.5, 0.4166, 0.8333, 0.7142, 0.8333, 0.625, 0.5, 0.2083, 0.3333, 0.5, 1.25, 0.8333, 0.4166, 0.625, 0.1515, 0.625, 0.625, 0.7142, 0.8333, 0.8333, 0.25, 0.625, 0.3571, 0.25, 0.5, 0.7142, 0.4166, 0.8333, 0.4545, 0.4545, 0.5555, 0.3125, 0.625, 0.3125, 0.25, 0.8333, 0.625, 0.3333, 0.5, 0.625, 0.4166, 0.5555, 0.1785, 0.25, 0.4545, 0.7142, 0.2380, 0.5555, 0.2777, 0.8333, 0.5555, 0.8333, 1.0, 0.4545, 0.4166, 0.8333, 0.2777, 0.1562, 0.2777, 0.25, 0.3846, 0.8333, 0.2173, 0.5, 0.3846, 0.4166, 0.7142, 1.25, 0.4166, 1.0, 1.0, 0.2631, 0.625, 0.2083, 0.625, 0.1666, 1.25, 0.5, 0.5555, 0.4166, 0.3125, 0.7142, 0.625, 0.7142, 0.7142, 0.5555, 0.2083, 0.3333, 0.2631, 0.8333, 0.1470, 0.4166, 0.8333, 0.8333, 0.1666, 0.2941, 0.4166, 0.8333, 0.3571, 0.4166, 0.25, 0.1785, 0.2380, 0.1851, 0.2777, 0.4166, 0.25, 0.7142, 0.25, 0.7142, 0.2941, 0.1041, 1.0, 0.4166, 0.1351, 0.2173, 0.4166, 1.0, 0.0847, 0.1562, 0.7142, 0.625, 0.5, 0.1785, 0.5, 0.4166, 0.8333, 0.3333, 0.7142, 0.1923, 0.5, 0.5555, 0.2777, 0.7142, 0.2941, 0.3333, 0.5, 0.5, 0.3571, 0.2083, 0.3846, 0.625, 1.25, 0.625, 0.4166, 0.7142, 0.3333, 0.8333, 0.8333, 0.0847, 1.0, 0.3571, 0.8333, 0.8333, 0.5, 0.7142, 0.3846, 0.625, 0.1, 0.7142, 0.3333, 0.7142, 1.25, 0.1562, 0.25, 0.3846, 0.5555, 0.4166, 0.5555, 0.625, 0.2777, 0.625, 1.0, 0.3125, 0.4545, 0.4166, 0.4166, 0.5555, 0.4166, 0.1470, 0.625, 0.625, 0.8333, 0.5, 0.7142, 0.3333, 0.1851, 0.7142, 0.4545, 0.1785, 0.0450, 0.7142, 0.3846, 0.3333, 0.625, 1.0, 0.3846, 0.8333, 0.625, 0.7142, 1.0, 0.3333, 0.4545, 0.625, 0.2173, 0.3125, 0.1785, 0.7142, 0.625, 0.1785, 0.3571, 0.625, 0.625, 0.8333, 0.7142, 0.8333, 0.625, 0.1724, 0.2777, 0.0537, 0.625, 0.1923, 0.8333, 0.8333, 0.2777, 1.0, 0.8333, 0.7142, 0.4166, 0.8333, 0.5, 0.625, 0.3571, 0.7142, 0.4166, 0.8333, 0.8333, 0.1515, 0.4166, 0.3125, 0.7142, 0.5555, 0.3571, 0.2083, 0.1612, 0.7142, 0.5, 0.2272, 0.3846, 0.625, 0.8333, 0.4545, 0.5, 0.4166, 0.2941, 0.0925, 0.2380, 0.625, 1.0, 0.1470, 0.8333, 0.3571, 0.3125, 1.25, 0.7142, 0.8333, 0.7142, 0.3333, 0.5555, 0.2380, 0.8333, 0.2, 0.3571, 0.5555, 0.5555, 0.4545, 0.7142, 0.8333, 0.3846, 1.0, 0.7142, 0.5, 0.3125, 0.4545, 0.5, 0.8333, 1.25, 0.5, 0.8333, 1.25, 0.4545, 0.7142, 0.625, 0.0877, 0.2777, 0.2941, 0.1428, 1.0, 0.2380, 0.1, 1.25, 0.5, 0.625, 0.5, 0.3125, 1.25, 0.625, 0.2777, 0.625, 0.4166, 0.625, 0.4545, 0.625, 0.5555, 1.0, 0.4166, 1.0, 0.5, 0.2777, 0.5, 0.3333, 1.25, 0.8333, 0.625, 0.4166, 0.4166, 0.5555, 0.4166, 0.5555, 1.25, 0.4166, 0.3846, 0.5555, 0.2631, 0.5555, 0.5, 0.3846, 0.7142, 0.4545, 0.8333, 1.25, 0.4166, 0.25, 0.2, 0.0625, 0.3333, 0.4545, 0.8333, 0.4545, 0.5, 0.1923, 0.7142, 0.4166, 0.2777, 0.1785, 0.8333, 0.8333, 0.3125, 0.2, 0.3571, 1.0, 0.2941, 0.625, 0.2941, 0.7142, 0.1724, 0.4166, 0.625, 0.5555, 1.25, 0.625, 0.625, 0.625, 0.5555, 0.7142, 0.3333, 0.2777, 1.0, 0.5555, 0.8333, 0.5, 0.4166, 0.2083, 0.7142, 0.5555, 0.5, 1.25, 0.5555, 0.625, 0.8333, 0.3125, 0.7142, 0.4166, 0.0515, 0.625, 0.7142, 0.5, 0.625, 0.625, 1.25, 0.8333, 0.1388, 0.2777, 0.4166, 0.625, 0.7142, 0.5, 0.5, 0.7142, 1.25, 1.0, 1.0, 0.625, 1.25, 1.0, 0.5, 0.625, 0.8333, 0.125, 0.0961, 0.0877, 0.5555, 0.4166, 0.3846, 0.3846, 0.4166, 0.5, 0.4166, 0.1562, 0.8333, 0.2083, 0.7142, 0.3125, 0.625, 0.2173, 0.4166, 0.4166, 0.25, 0.625, 0.5555, 0.2941, 0.8333, 0.8333, 0.625, 0.8333, 0.4166, 0.2941, 0.1219, 1.0, 0.2941, 0.4166, 0.7142, 0.625, 0.5555, 0.4166, 0.4166, 0.2083, 0.3125, 0.3571, 1.25, 0.5, 0.8333, 0.2631, 0.7142, 0.5, 0.8333, 0.625, 0.3125, 0.625, 0.8333, 0.625, 1.0, 0.8333, 0.7142, 0.8333, 0.625, 0.7142, 0.1219, 0.1562, 0.5, 0.3125, 0.5, 0.4545, 0.4166, 0.625, 1.0, 0.625, 0.8333, 0.4166, 0.3125, 0.625, 0.4166, 0.4166, 0.3846, 0.1020, 0.5, 0.7142, 0.1851, 0.3571, 0.0909, 0.1851, 0.2272, 0.3125, 0.3125, 0.4166, 0.8333, 0.7142, 0.4166, 0.1724, 0.5555, 1.0, 0.4166, 0.8333, 0.2777, 0.625, 0.625, 0.625, 0.8333, 0.5, 0.625, 0.2173, 0.5555, 0.4545, 0.625, 0.8333, 0.7142, 0.4545, 0.625, 0.7142, 0.3333, 0.625, 0.2083, 0.5, 1.0, 0.0961, 0.2380, 1.0, 0.4545, 0.3846, 0.5555, 0.4545, 0.4166, 0.625, 0.7142, 0.4166, 1.0, 0.625, 1.25, 0.2, 0.8333, 0.2083, 0.2173, 0.4545, 0.0431, 0.5, 0.1923, 0.3846, 1.0, 0.7142, 1.0, 0.5, 0.7142, 0.0806, 0.3846, 0.5555, 0.0980, 0.8333, 0.5555, 0.625, 0.2631, 0.1351, 0.8333, 0.3125, 0.8333, 0.625, 0.4166, 0.2941, 1.0, 0.8333, 1.25, 0.5555, 0.8333, 1.0, 0.8333, 0.625, 0.2, 0.3333, 0.3571, 0.625, 0.8333, 0.3571, 0.625, 0.8333, 0.8333, 0.5555, 0.5555, 0.625, 0.1666, 0.8333, 0.3125, 0.3571, 0.4166, 0.8333, 0.625, 0.2083, 0.3571, 0.7142, 0.625, 0.3571, 0.625, 0.8333, 0.3333, 0.625, 0.3125, 0.2777, 1.25, 0.625, 0.7142, 0.1562, 0.8333, 1.0, 0.7142, 0.625, 0.5, 0.4166, 0.2777, 0.625, 0.625, 0.2272, 0.7142, 0.1666, 0.3846, 0.625, 0.3125, 0.7142, 0.1136, 0.8333, 0.7142, 0.3846, 0.5555, 0.625, 0.625, 0.4545, 1.0, 0.5, 0.1388, 0.5, 0.625, 0.625, 1.0, 0.1785, 0.7142, 0.4545, 0.8333, 0.5555, 0.8333, 0.1388, 0.7142, 0.625, 0.4166, 0.3333, 0.5, 1.25, 0.2272, 0.625, 0.1470, 0.1666, 0.1315, 0.5555, 0.625, 0.5, 0.7142, 0.5, 0.4166, 1.25, 1.0, 0.5555, 0.625, 0.625, 1.0, 0.3571, 0.4545, 0.625, 0.3333, 0.625, 0.3125, 0.2941, 0.7142, 0.5, 0.4545, 0.4545, 0.625, 0.2777, 0.625, 0.1785, 0.25, 0.4166, 0.5555, 0.625, 0.5, 0.3125, 0.625, 0.625, 0.625, 0.8333, 0.3125, 0.4166, 0.7142, 0.4166, 0.3125, 1.0, 0.3571, 0.5555, 0.3846, 0.1562, 0.3571, 0.3846, 0.5555, 0.625, 0.2941, 0.4545, 1.0, 0.625, 0.3333, 0.5, 0.1785, 0.1851, 1.25, 0.5555, 0.625, 0.625, 0.5, 0.8333, 0.2777, 0.5, 1.25, 0.625, 0.5555, 0.2083, 0.25, 0.7142, 0.5, 0.8333, 0.4166, 0.3571, 0.4166, 0.3333, 0.25, 0.4545, 0.2777, 0.0943, 0.625, 0.5555, 0.625, 0.5555, 0.5555, 0.1612, 0.8333, 0.4545, 0.5555, 0.625, 0.3125, 0.7142, 1.25, 0.5555, 0.4545, 0.5, 0.8333, 0.25, 0.8333, 0.7142, 0.4166, 0.4166, 0.5, 0.7142, 0.2777, 0.5555, 0.3846, 0.2, 0.2941, 0.3333, 0.3333, 0.8333, 0.3125, 0.25, 1.0, 0.625, 0.3333, 0.2083, 1.25, 0.7142, 0.1785, 0.7142, 0.7142, 0.2083, 0.7142, 0.3125, 0.2941, 0.1785, 0.3846, 0.5, 0.625, 0.3125, 0.7142, 0.1020, 0.2380, 0.7142, 0.7142, 0.7142, 0.4166, 0.4545, 0.3571, 0.625, 0.5555, 0.8333, 0.3333, 0.2777, 0.5, 0.3125, 0.625, 0.8333, 0.8333, 0.25, 0.5, 0.3571, 0.3846, 0.5, 0.7142, 0.5555, 0.4545, 0.2173, 0.3333, 0.625, 0.625, 0.625, 0.8333, 0.3333, 0.2941, 0.3125, 0.1282, 0.4166, 0.8333, 0.8333, 0.625, 0.4545, 0.8333, 0.4166, 0.625, 0.625, 0.5, 0.625, 0.3571, 0.25, 0.3125, 0.3846, 0.625, 1.0, 0.4166, 0.7142, 1.25, 0.625, 0.7142, 0.5555, 0.3846, 0.4166, 0.625, 0.1923, 0.5, 0.7142, 0.4166, 0.25, 0.8333, 0.5555, 0.3571, 0.1428, 1.25, 0.1315, 0.8333, 1.25, 0.8333, 0.4166, 0.3846, 0.7142, 1.25, 0.7142, 1.0, 0.625, 1.0, 0.625, 1.0, 1.25, 0.4166, 1.0, 0.8333, 0.625, 0.5555, 1.0, 1.0, 0.8333, 0.2631, 0.3125, 0.3125, 0.4166, 0.625, 0.4545, 0.1219, 0.3571, 0.3125, 1.0, 0.5555, 0.7142, 0.8333, 0.1562, 0.4166, 0.625, 1.25, 1.25, 0.3846, 0.8333, 0.0833, 0.1315, 1.25, 1.0, 0.5, 0.8333, 0.3333, 0.8333, 0.4166, 0.3125, 0.7142, 0.625, 0.4545, 0.625, 0.2, 1.25, 0.2941, 1.25, 0.3333, 0.8333, 0.625, 0.3571, 0.5555, 0.1388, 0.625, 0.2380, 0.625, 0.3571, 0.4166, 0.5, 0.2083, 1.0, 0.2941, 0.7142, 1.25, 0.3846, 0.5555, 0.3125, 0.2083, 0.625, 0.5, 0.1666, 1.25, 1.0, 0.3846, 0.8333, 0.1923, 0.3125, 0.7142, 0.7142, 0.8333, 0.2380, 0.4545, 0.2777, 0.3846, 0.8333, 0.3846, 0.625, 0.5555, 0.4166, 0.3333, 1.25, 0.4545, 0.8333, 0.7142, 0.625, 0.625, 0.7142, 0.625, 0.5, 0.7142, 0.1923, 1.0, 0.5, 0.5555, 0.7142, 0.7142, 0.5555, 0.1388, 0.8333, 0.1351, 0.8333, 0.625, 0.1162, 0.5555, 0.5555, 1.0, 0.2777, 0.1219, 0.5555, 0.5555, 0.3846, 1.25, 0.8333, 0.4166, 0.4166, 0.4166, 0.2941, 1.0, 0.7142, 0.3333, 0.3125, 0.3846, 1.0, 0.4166, 0.7142, 0.4545, 1.25, 0.7142, 0.7142, 0.625, 0.5, 0.4166, 0.5555, 0.3125, 0.5555, 0.3846, 1.25, 0.3125, 0.2083, 0.7142, 0.3846, 0.5, 0.8333, 0.7142, 0.4545, 0.625, 1.0, 0.5, 0.7142, 0.4166, 1.0, 0.4545, 0.1612, 0.5555, 0.4545, 0.7142, 0.8333, 0.3846, 0.4166, 0.1923, 0.1388, 1.0, 0.1, 0.1470, 0.5, 0.4166, 1.0, 0.3846, 0.1562, 0.8333, 0.3571, 0.8333, 0.625, 0.1666, 0.2631, 0.5555, 0.8333, 0.4166, 0.25, 0.1923, 0.8333, 0.625, 0.5555, 0.7142, 0.625, 0.7142, 0.8333, 0.8333, 1.25, 0.625, 0.4545, 1.0, 0.3125, 1.0, 0.7142, 0.4166, 0.1282, 0.625, 0.2083, 0.5555, 0.625, 0.8333, 0.8333, 0.7142, 0.2173, 0.2272, 0.4166, 0.3333, 0.3125, 0.3125, 0.625, 0.2777, 0.2777, 0.4166, 0.2941, 0.8333, 0.1923, 0.3846, 0.1428, 0.4545, 0.3571, 0.625, 1.25, 0.5, 0.3846, 0.7142, 0.1470, 0.3125, 0.5555, 0.3846, 0.625, 0.8333, 0.4545, 0.25, 0.625, 0.625, 0.8333, 0.5555, 0.2631, 0.1666, 0.8333, 0.5, 0.625, 0.4166, 0.4545, 0.625, 0.625, 0.8333, 0.7142, 1.0, 0.25, 0.625, 1.25, 0.4545, 0.5, 0.5555, 0.625, 0.625, 0.625, 0.8333, 0.5, 0.1111, 0.4166, 0.625, 0.8333, 0.2173, 0.4166, 1.0, 0.2380, 0.7142, 0.7142, 0.4166, 0.8333, 0.3846, 1.25, 0.4166, 0.625, 0.3333, 0.1851, 0.4545, 0.625, 0.5, 0.625, 0.625, 1.0, 0.8333, 0.1428, 0.4545, 0.4166, 0.625, 0.2631, 0.625, 0.4166, 0.8333, 0.5555, 0.8333, 0.0375, 0.625, 0.4166, 0.625, 0.8333, 0.5555, 0.3571, 0.625, 1.0, 0.1, 0.2, 0.5555, 0.625, 0.5555, 0.7142, 0.625, 0.2173, 0.625, 0.5555, 0.7142, 0.625, 0.625, 0.7142, 0.7142, 0.8333, 1.0, 0.8333, 0.1851, 0.3125, 0.1612, 0.1388, 0.5555, 0.1785, 0.8333, 0.7142, 0.7142, 0.625, 0.1923, 0.7142, 0.2083, 0.0806, 0.3125, 0.625, 0.1515, 0.3333, 0.2173, 0.3571, 0.2777, 0.5, 0.3333, 0.0609, 0.625, 0.7142, 0.5555, 0.3571, 0.1388, 0.5, 0.8333, 0.4166, 0.5555, 0.625, 1.25, 0.0549, 0.8333, 0.7142, 0.2380, 0.7142, 0.4166, 0.3571, 0.625, 0.8333, 0.8333, 0.3846, 0.3846, 0.625, 0.3571, 0.2083, 0.0757, 0.625, 0.2380, 1.0, 0.7142, 0.625, 0.625, 0.3125, 0.5555, 0.7142, 0.2777, 0.625, 0.4545, 0.4545, 0.8333, 0.2173, 0.5, 0.7142, 0.5, 0.8333, 0.3125, 1.25, 0.625, 0.1666, 0.625, 1.25, 0.25, 0.625, 0.3571, 1.0, 0.5, 0.625, 0.1562, 0.3125, 0.3846, 1.25, 0.8333, 0.4545, 1.0, 0.5, 0.4166, 0.625, 0.2380, 1.25, 1.25, 0.4545, 0.625, 0.625, 0.5555, 0.8333, 0.1388, 0.3571, 0.625, 0.2272, 0.4166, 1.0, 0.5555, 0.8333, 0.25, 0.2631, 0.5555, 0.3846, 0.7142, 0.25, 0.8333, 0.3846, 1.25, 0.5, 0.4545, 0.7142, 0.3333, 0.625, 0.25, 1.0, 0.25, 0.8333, 0.2941, 0.2777, 0.625, 0.2777, 0.3333, 0.8333, 0.7142, 0.2, 0.5555, 0.3846, 0.7142, 0.3333, 0.5555, 0.7142, 0.3571, 0.3125, 0.625, 0.3333, 0.5, 0.2083, 0.0462, 0.3846, 0.3846, 0.5555, 0.2083, 0.3846, 0.8333, 0.5555, 0.5, 0.3846, 0.8333, 0.25, 0.8333, 0.625, 0.625, 0.3125, 0.4166, 0.3571, 0.5555, 1.0, 1.0, 1.0, 0.7142, 0.625, 0.4166, 0.7142, 0.5555, 1.25, 0.625, 0.25, 1.25, 1.25, 0.5555, 0.7142, 0.625, 0.5555, 0.625, 0.1785, 0.3125, 0.625, 0.625, 0.7142, 0.3333, 0.4545, 0.625, 0.1041, 0.3125, 0.4545, 0.5, 0.3846, 0.2941, 0.4166, 0.5, 0.2631, 1.25, 0.5, 0.2631, 0.3571, 0.5555, 0.2631, 0.7142, 0.3125, 0.3571, 0.3125, 0.3846, 0.625, 0.1219, 1.0, 0.5, 0.7142, 1.25, 0.2380, 0.625, 0.5555, 0.4166, 0.5, 1.25, 0.4166, 0.5, 0.4166, 0.8333, 0.2380, 1.0, 0.5555, 0.0892, 0.625, 0.3333, 0.25, 0.3571, 1.25, 1.0, 0.5555, 0.5555, 1.25, 0.4166, 0.2083, 0.5, 0.8333, 0.1666, 0.4166, 0.2941, 1.0, 0.625, 0.7142, 0.7142, 0.625, 0.8333, 0.0781, 0.5, 0.1724, 0.4166, 0.1388, 0.4166, 0.625, 0.625, 0.1851, 0.3125, 0.5555, 0.4166, 0.8333, 0.4166, 1.0, 0.4166, 0.8333, 0.7142, 0.3333, 0.4166, 0.4166, 0.4166, 0.3333, 0.625, 0.7142, 0.625, 0.2777, 0.2631, 0.4545, 0.2083, 0.625, 0.2941, 1.25, 0.8333, 0.5555, 0.3125, 0.1388, 1.25, 0.2631, 0.4545, 0.8333, 0.2631, 0.4545, 1.0, 0.3125, 0.5, 0.8333, 0.2272, 0.8333, 0.5555, 0.0833, 0.1785, 0.7142, 0.2272, 0.3333, 0.3333, 0.3571, 1.0, 0.8333, 0.25, 0.25, 0.5555, 0.2631, 0.625, 0.625, 1.0, 0.25, 0.625, 0.25, 0.7142, 0.2173, 0.625, 0.8333, 0.8333, 0.5555, 0.4166, 0.3125, 0.4166, 0.625, 0.5, 0.4166, 0.8333, 0.3846, 0.7142, 1.0, 0.25, 0.625, 0.8333, 0.8333, 0.2173, 0.8333, 0.2272, 1.0, 0.625, 0.2380, 0.625, 0.625, 0.2941, 0.7142, 0.7142, 0.3846, 0.3125, 0.1666, 0.8333, 0.25, 1.25, 0.3846, 0.7142, 0.4545, 0.4545, 0.5555, 0.7142, 0.5555, 0.0694, 0.625, 0.7142, 0.4545, 0.2272, 0.625, 0.4545, 0.4545, 0.8333, 0.1470, 1.25, 0.2777, 0.4166, 0.5, 0.2083, 1.25, 0.2941, 0.5555, 0.4545, 0.3125, 0.8333, 0.3125, 0.7142, 0.625, 0.25, 0.5, 0.625, 0.2777, 0.5555, 0.625, 0.625, 0.5555, 0.5, 0.5555, 0.2631, 0.3125, 0.25, 0.25, 0.2083, 0.625, 0.625, 0.625, 0.8333, 0.3125, 0.5555, 0.5, 0.3571, 0.25, 0.8333, 0.4166, 0.5, 0.5555, 0.625, 0.2941, 0.7142, 0.4166, 1.0, 0.7142, 0.4166, 0.4166, 0.4166, 0.3125, 0.4545, 0.2272, 0.1470, 0.2941, 0.4166, 0.625, 1.25, 0.3333, 0.4166, 0.2083, 0.3333, 0.5555, 0.4166, 0.625, 0.7142, 0.625, 0.1428, 0.3571, 0.625, 1.0, 0.2941, 0.8333, 0.4166, 0.8333, 0.8333, 0.3125, 0.3125, 0.125, 0.7142, 0.8333, 0.4166, 0.8333, 0.5555, 0.3333, 0.8333, 0.4545, 0.5555, 0.5555, 0.25, 0.4545, 0.5555, 0.4545, 0.5555, 0.8333, 0.625, 0.1923, 0.5555, 0.3125, 0.4166, 0.3571, 1.0, 0.5, 0.625, 0.8333, 0.5, 0.7142, 0.4166, 0.7142, 0.0632, 0.7142, 0.1041, 0.3125, 0.3571, 0.7142, 0.4166, 0.1190, 0.1041, 0.3125, 0.25, 0.625, 0.2272, 0.625, 0.4545, 0.4166, 0.1612, 0.2272, 0.5555, 0.2, 0.5, 0.625, 0.4166, 0.3125, 0.3333, 0.5555, 0.2777, 0.625, 0.8333, 0.8333, 0.3333, 0.25, 0.8333, 0.8333, 0.3125, 0.3846, 0.5, 0.1666, 0.1136, 0.8333, 0.625, 0.5, 0.8333, 0.8333, 0.7142, 0.4166, 0.8333, 0.7142, 0.3125, 1.0, 0.3125, 0.1562, 0.4545, 0.4166, 0.5555, 0.8333, 0.4545, 0.3571, 0.4166, 0.625, 1.0, 0.8333, 0.3125, 0.1724, 0.4545, 0.625, 0.3125, 0.3571, 1.0, 1.25, 0.3571, 0.2272, 0.625, 0.7142, 1.0, 0.625, 1.25, 0.8333, 0.625, 0.7142, 0.625, 0.4166, 0.625, 0.1470, 0.625, 0.4545, 0.4166, 0.7142, 0.8333, 0.5, 0.1724, 0.7142, 0.2777, 0.1136, 0.625, 0.5555, 0.3125, 0.7142, 0.3846, 0.5555, 0.1428, 0.8333, 0.2380, 0.7142, 0.5, 0.25, 0.8333, 0.625, 0.4166, 0.3125, 0.7142, 0.625, 1.0, 0.2380, 0.0925, 0.625, 0.3846, 0.1785, 0.5555, 1.0, 0.7142, 0.8333, 0.5, 0.2941, 1.25, 0.25, 0.7142, 0.3333, 0.5555, 0.625, 0.8333, 0.2777, 1.0, 0.625, 0.0806, 1.25, 0.2941, 0.625, 0.3125, 0.5, 0.7142, 0.8333, 0.625, 1.0, 0.5, 0.4545, 0.7142, 0.1515, 0.7142, 0.625, 0.7142, 0.5555, 0.4166, 0.3571, 0.3846, 0.7142, 0.625, 0.5, 0.625, 0.2631, 0.3333, 0.3571, 0.3846, 1.0, 0.25, 0.625, 0.625, 0.4166, 0.1428, 0.5555, 0.0625, 0.8333, 0.1923, 0.7142, 0.8333, 0.7142, 1.0, 0.1724, 0.625, 0.7142, 0.625, 0.2941, 0.625, 0.3125, 0.1562, 0.5, 0.5555, 0.4166, 0.8333, 0.7142, 0.7142, 0.4166, 0.625, 0.4166, 0.4166, 0.4166, 0.7142, 0.5, 0.5555, 0.0961, 0.1562, 1.0, 0.4166, 0.3333, 0.4166, 0.1388, 0.5555, 0.4545, 0.7142, 0.625, 0.4166, 0.3125, 0.7142, 0.625, 0.8333, 0.4166, 0.1111, 1.0, 0.4166, 0.1923, 0.5555, 0.25, 0.2, 0.5, 0.1923, 0.2631, 0.1219, 0.5, 0.2941, 0.2777, 0.2380, 0.7142, 0.1724, 0.8333, 0.625, 0.8333, 0.8333, 0.7142, 0.3846, 0.2777, 0.8333, 0.4166, 0.0892, 1.0, 1.0, 1.0, 0.1724, 0.625, 0.3571, 0.625, 0.3125, 1.0, 0.8333, 0.2777, 0.1612, 0.1724, 0.3125, 0.4166, 0.5, 0.3846, 0.625, 0.25, 0.7142, 0.3333, 0.7142, 0.25, 0.5555, 0.4166, 0.2941, 0.3571, 1.0, 1.0, 0.1086, 0.7142, 0.8333, 0.625, 0.5, 0.3125, 0.625, 0.625, 0.625, 0.2083, 0.1724, 0.3846, 0.625, 0.1785, 0.3571, 0.4166, 0.4166, 1.0, 0.5555, 0.7142, 0.4545, 1.0, 0.2, 0.3571, 0.25, 1.0, 0.1470, 0.1851, 0.4166, 0.7142, 0.4166, 0.2, 0.7142, 0.3571, 0.3846, 0.8333, 0.2083, 0.2, 0.2272, 0.2941, 1.0, 0.5, 0.5, 0.1351, 0.625, 0.625, 0.625, 0.3125, 0.7142, 0.1162, 0.0833, 0.4166, 0.3125, 0.4166, 0.3125, 0.5555, 1.0, 0.625, 0.2941, 0.0561, 0.8333, 0.4166, 0.5555, 0.3125, 0.625, 0.625, 0.625, 0.2631, 0.4545, 0.1428, 0.7142, 0.2083, 1.0, 1.0, 1.0, 0.4166, 0.4166, 0.625, 0.3125, 0.7142, 0.4166, 0.7142, 0.625, 0.5, 0.0847, 0.5, 0.625, 0.7142, 0.8333, 1.25, 0.1785, 0.8333, 0.4166, 0.3571, 0.4545, 0.5555, 0.1923, 0.8333, 0.3333, 0.3125, 0.8333, 0.2941, 0.3125, 0.3125, 0.3125, 0.7142, 0.625, 0.1515, 0.0943, 0.7142, 0.4545, 0.1785, 0.3333, 0.2941, 0.4545, 0.3125, 0.7142, 0.2272, 0.1315, 0.5555, 0.7142, 0.1724, 0.5, 0.625, 0.0961, 0.7142, 0.8333, 0.4545, 0.4166, 0.8333, 0.625, 0.1136, 0.1470, 0.5555, 0.625, 0.1851, 0.625, 0.5555, 0.5555, 0.625, 0.5555, 0.8333, 0.1724, 0.5555, 0.625, 0.3846, 0.2941, 0.5555, 0.4166, 0.8333, 0.3846, 0.1785, 0.5555, 0.625, 0.5555, 0.625, 0.5555, 0.1428, 0.5, 0.2631, 0.5, 0.625, 0.3846, 0.3571, 0.625, 0.5, 0.8333, 0.8333, 0.1562, 0.3333, 0.8333, 0.4545, 0.7142, 0.2941, 0.625, 0.2777, 0.2083, 1.0, 0.2941, 1.0, 0.625, 0.3571, 0.3125, 1.0, 0.1851, 0.4545, 0.625, 0.8333, 0.25, 0.2083, 0.625, 0.625, 0.2631, 0.8333, 0.625, 0.625, 0.4166, 0.4166, 0.2380, 0.2380, 1.0, 0.5555, 0.1785, 0.5, 0.3125, 0.625, 0.1351, 0.625, 0.1136, 0.4166, 0.7142, 0.8333, 0.8333, 0.2083, 0.7142, 1.25, 0.4545, 0.7142, 0.8333, 0.3846, 0.625, 0.5, 0.2083, 0.3125, 0.1562, 1.25, 0.8333, 0.8333, 0.0625, 1.0, 0.5555, 0.5555, 0.8333, 0.8333, 0.2777, 0.5555, 0.8333, 0.625, 0.5, 0.7142, 0.625, 0.3125, 0.625, 0.7142, 1.0, 0.625, 0.5555, 0.5555, 0.5555, 0.4545, 0.3333, 0.625, 0.4166, 0.4166, 1.25, 1.0, 0.3571, 1.0, 0.3571, 0.2777, 0.625, 0.3125, 0.4166, 0.5, 0.4166, 0.3125, 0.25, 0.8333, 0.4545, 0.1063, 0.625, 0.8333, 0.1190, 0.4166, 0.25, 0.625, 0.4166, 0.25, 0.625, 0.3125, 0.3846, 0.4166, 0.8333, 0.2083, 0.3846, 1.25, 0.8333, 0.625, 0.625, 0.625, 0.1562, 0.625, 0.5555, 0.3125, 0.2941, 0.2777, 0.625, 0.3571, 0.8333, 0.625, 0.25, 0.5555, 0.5555, 0.1562, 0.5, 0.3333, 0.1086, 0.3333, 1.0, 0.625, 0.3333, 0.7142, 1.0, 0.625, 1.25, 0.8333, 0.625, 1.25, 0.5555, 0.3125, 0.3846, 1.0, 0.7142, 0.3846, 0.625, 0.8333, 0.8333, 0.3125, 1.0, 0.3846, 0.1785, 0.8333, 0.4545, 0.1666, 0.8333, 0.8333, 0.3125, 1.25, 0.1562, 0.3333, 0.4166, 1.0, 0.8333, 0.5555, 0.5, 0.4545, 0.5, 0.3125, 0.1470, 0.2083, 0.625, 0.625, 0.625, 0.8333, 0.7142, 0.3846, 0.4166, 0.3125, 0.625, 0.4545, 0.4545, 0.7142, 0.2083, 1.0, 0.5, 0.2173, 0.8333, 0.1282, 0.3846, 0.5, 0.4545, 1.0, 0.25, 0.4545, 0.625, 0.7142, 0.2777, 1.25, 0.1515, 0.625, 0.7142, 0.3846, 0.4166, 0.3571, 0.1219, 0.3333, 0.2173, 0.3846, 0.1851, 0.8333, 0.2631, 0.8333, 0.625, 0.4166, 0.3333, 0.2631, 0.5, 0.1388, 1.0, 0.5, 0.8333, 0.2777, 0.625, 0.2631, 0.7142, 0.4166, 0.625, 0.5555, 0.625, 0.3333, 1.0, 0.3125, 0.3571, 0.4166, 1.0, 0.5, 0.4166, 0.4166, 0.2380, 1.0, 0.25, 0.125, 0.4166, 0.5555, 0.625, 0.5555, 0.25, 0.125, 0.2941, 0.625, 0.2941, 0.25, 0.5, 0.7142, 0.3333, 0.7142, 0.5, 0.2941, 0.8333, 0.625, 0.5555, 0.625, 0.1562, 0.4545, 0.8333, 0.8333, 0.8333, 0.3846, 0.4545, 0.3333, 0.1282, 0.5, 0.1388, 0.4545, 1.25, 0.3125, 0.7142, 0.625, 0.25, 0.625, 0.3571, 0.3846, 1.0, 0.7142, 1.25, 0.7142, 0.625, 0.4166, 0.2272, 0.5555, 0.5555, 0.7142, 0.3125, 0.0781, 0.3333, 0.2777, 0.0649, 0.7142, 0.8333, 0.625, 0.625, 0.7142, 0.2777, 0.5555, 0.2380, 0.1388, 0.8333, 0.5555, 0.3571, 0.8333, 1.0, 0.4166, 0.3125, 0.7142, 0.8333, 0.4545, 0.8333, 0.8333, 0.8333, 0.625, 0.1923, 0.4166, 0.1666, 0.4166, 0.8333, 0.7142, 0.7142, 1.0, 0.625, 0.7142, 0.8333, 0.625, 0.4166, 0.7142, 0.625, 0.625, 0.8333, 0.25, 0.2941, 0.0781, 1.0, 0.3125, 0.1923, 0.4166, 0.2777, 0.5, 0.625, 0.5, 0.1562, 0.3125, 0.8333, 0.7142, 0.1351, 0.7142, 0.1388, 0.8333, 0.8333, 0.4166, 0.8333, 0.2941, 1.25, 0.3125, 0.5555, 0.7142, 0.4166, 1.0, 0.1351, 1.0, 0.3846, 0.8333, 0.8333, 0.8333, 0.3571, 0.7142, 1.25, 0.8333, 0.625, 0.1785, 1.0, 0.1851, 0.4545, 0.8333, 0.0806, 0.7142, 0.3125, 1.0, 0.4166, 0.3846, 0.7142, 0.4166, 0.7142, 0.1851, 0.5555, 1.0, 0.3846, 0.625, 0.3846, 0.2777, 0.5, 0.2173, 0.7142, 0.1388, 0.5, 0.7142, 0.8333, 1.25, 0.625, 0.5, 0.4545, 0.625, 0.625, 0.8333, 0.4166, 1.0, 0.8333, 0.625, 0.2631, 0.25, 0.625, 0.4166, 0.3125, 0.3125, 0.2631, 0.1428, 0.625, 0.8333, 0.1351, 0.4166, 0.7142, 0.3333, 0.1063, 0.2631, 0.625, 0.3571, 0.1515, 0.4166, 0.625, 0.8333, 0.3571, 0.2631, 0.4545, 0.8333, 0.625, 0.625, 0.625, 1.25, 0.8333, 0.625, 0.7142, 0.8333, 0.3846, 0.8333, 0.4166, 0.5, 0.4166, 0.1111, 0.2777, 0.5555, 0.2272, 0.625, 0.625, 0.7142, 0.3333, 0.2, 0.1612, 0.3846, 0.0520, 1.0, 0.1388, 0.5, 0.4166, 1.25, 0.1851, 0.4545, 0.8333, 0.2380, 0.8333, 0.2, 0.4166, 0.3571, 1.0, 0.625, 0.7142, 0.7142, 0.3125, 0.625, 0.3846, 0.2272, 0.3125, 0.7142, 0.7142, 0.2777, 0.625, 0.8333, 0.8333, 0.1785, 0.4166, 0.1086, 0.4166, 0.7142, 0.625, 0.8333, 0.25, 0.1219, 0.8333, 0.4166, 0.8333, 0.625, 0.8333, 0.5555, 0.4545, 0.3125, 0.625, 0.625, 0.625, 0.4166, 0.1923, 0.3125, 0.5555, 0.625, 0.3125, 0.0595, 0.5, 0.5555, 0.5555, 0.7142, 0.3571, 0.625, 0.2631, 0.625, 0.4545, 0.625, 0.3571, 0.1515, 0.5555, 0.1785, 0.1785, 0.3125, 0.7142, 0.5, 0.8333, 0.1470, 0.2941, 0.4545, 0.7142, 0.3333, 1.0, 0.5555, 0.2941, 0.3571, 0.625, 0.4166, 0.5555, 0.3333, 0.625, 0.2083, 0.625, 0.25, 0.7142, 0.2272, 1.25, 0.625, 0.3333, 0.3846, 0.1470, 0.7142, 0.4166, 0.625, 0.8333, 0.5555, 0.625, 0.8333, 0.2380, 0.1851, 0.5555, 0.625, 0.3125, 0.4166, 0.0746, 0.4166, 0.2631, 0.1515, 0.1612, 0.4166, 0.2, 0.7142, 0.3125, 0.0833, 0.5555, 0.2083, 0.625, 0.1388, 0.5, 0.1612, 0.625, 0.2083, 0.0980, 0.2272, 0.4166, 0.7142, 0.0961, 0.4545, 0.625, 1.0, 0.3125, 0.7142, 0.625, 0.7142, 0.3125, 0.7142, 0.1612, 0.3846, 0.3571, 0.625, 0.25, 1.25, 0.3125, 0.2777, 0.8333, 0.4545, 0.25, 0.5555, 0.3125, 0.3846, 0.2173, 0.2777, 0.625, 0.4166, 0.4545, 0.8333, 0.8333, 0.4166, 0.8333, 1.25, 0.25, 0.7142, 0.7142, 0.2083, 0.8333, 0.3125, 0.4166]).cuda()
+    Class_CrossEntropyLoss = nn.CrossEntropyLoss(weight=classes_weight).cuda()
     #TODO set weights for unbalanced label.
-    Channel_CrossEntropyLoss = nn.CrossEntropyLoss()
-    AdversarialLoss = nn.BCELoss()
-    Triple_loss = TripleLoss()
+    channel_weight = torch.Tensor([1.0, 0.05]).cuda()
+    Channel_CrossEntropyLoss = nn.CrossEntropyLoss(weight=channel_weight).cuda()
+    Official_tripletloss = nn.TripletMarginWithDistanceLoss(margin=0.3, reduction='sum', distance_function=lambda x,y: 1.0 - F.cosine_similarity(x,y)).cuda()
+    Triple_loss = TripleLoss().cuda()
     
-    optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters()} ], lr=1e-3, momentum=0.9)
-    optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, {'params': G.parameters()} ], lr=1e-3, momentum=0.9)
+    optimizer_D1G = optim.SGD([ {'params': D1.parameters()}, {'params': FC_D1.parameters()}, {'params': G.parameters()},{'params': Triple_loss.parameters() } ], lr=lr_init, momentum=0.2)
+    optimizer_D2 = optim.SGD([ {'params': D2.parameters()}, {'params': G.parameters()} ], lr=lr_init, momentum=0.2)
     
     
-    train_dataset = MyDataset(mode='train')
-    train_dataloader = DataLoader(train_dataset,batch_size = 1, shuffle=False, drop_last=True, num_workers=5 )
+    train_dataset = MyDataset(mode='train', batch_size=batch_size)
+    train_dataloader = DataLoader(train_dataset,batch_size = 1, shuffle=False, drop_last=True, num_workers=30 )
     
     for epoch in range(epochs):
-        train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss,Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss, args)
+        train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss,Official_tripletloss,  args)
 
 
-def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, AdversarialLoss, Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss, args):
+def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss,  Triple_loss,  optimizer_D1G, optimizer_D2, epoch, batch_size, Channel_CrossEntropyLoss, Official_tripletloss, args):
     cur_idx = 0
     for batch_id,(x,y) in enumerate(train_dataloader):
+        print ("batch_id:")
+        print (batch_id)
+        print ("cur_idx:")
+        print (cur_idx)
         cur_idx = cur_idx + 1
         idx = epoch * batch_size + cur_idx
-        optimizer_D1G.zero_grad()
-        optimizer_D2.zero_grad()
         
         x = x.squeeze()
         x = x.transpose(dim0=0, dim1=1)
@@ -503,10 +462,10 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         y = y.squeeze()
         y = y.cuda()
         generator_feature = G(x)
-        print ('generator_feature.shape:')
-        print (generator_feature.shape)
         generator_feature = generator_feature.transpose(dim0=0, dim1=1)
         generator_feature = generator_feature.unsqueeze(dim=1)
+        print ('generator_feature.shape:')
+        print (generator_feature.shape)
         print ('generator_feature:')
         print (generator_feature)
         spk_embedding = D1(generator_feature)
@@ -514,55 +473,64 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
         print ('spk_embedding:')
         print (spk_embedding)
         pred_speakerid = FC_D1(spk_embedding)
+        print ('input_y:')
+        print (y.shape)
+        print (y)
+        print ('pred_speakerid:')
+        print (pred_speakerid.shape)
+        print (pred_speakerid)
         
         #train G,D1
-        G.train()
-        D1.train()
-        D2.eval()
         #compute loss
-        Ls = Class_CrossEntropyLoss(pred_speakerid,y)
-        Lt = Triple_loss(spk_embedding, y)
-        L_d1 = Ls + Lt
-        L_d1.backward()
+        #Ls = Class_CrossEntropyLoss(pred_speakerid,y)
+        #Ls.backward()
+        optimizer_D1G.zero_grad()
+        spk_embedding = normalize(spk_embedding)
+        embedding_ap, embedding_an = Triple_loss(spk_embedding, y)
+        Lt = Official_tripletloss(spk_embedding, embedding_ap, embedding_an)
+        Lt.backward()
+
+        #L_d1 = Ls + Lt
+        #L_d1.backward()
+
         #update gradients.  TODO:MIN?
-        writer.add_scalar('loss/triple', Lt.item(),idx)
-        writer.add_scalar('loss/softmax', Ls.item(),idx)
-        writer.add_scalar('loss/triple+softmax', L_d1.item(),idx)
-        #TODO  maybe not same with Eq.11. Detail: D2'G network parameters shoud be update in condition of same input with D1.
         optimizer_D1G.step()
 
-        #train D2
-        G.train()
-        D2.train()
-        optimizer_D1G.zero_grad()
-        optimizer_D2.zero_grad()
-        generator_feature = G(x)
-        generator_feature = generator_feature.transpose(dim0=0, dim1=1)
-        generator_feature = generator_feature.unsqueeze(dim=1)
-        pred_channel = D2(generator_feature)
-        ##get channel_label
-        #TODO get channel label gracefully.
-        channel_label = []
-        for i in y:
-            if i.item() < 10:
-                channel_label.append(0)    
-            else:
-                channel_label.append(1)    
-        channel_label = torch.from_numpy(np.array(channel_label)).cuda()
-        print ('--------------------------')
-        print ('pred_channel.shape:')
-        print (pred_channel.shape)
-        print (pred_channel)
-        print ('channel_label.shape:')
-        print (channel_label.shape)
-        print (channel_label)
-        #TODO Eq.10 is max loss. check.
-        L_d2 = 0 - Channel_CrossEntropyLoss(pred_channel,channel_label)
-        #L_d2 = Channel_CrossEntropyLoss(pred_channel,channel_label)
-        L_d2.backward()
-        writer.add_scalar('loss/channel', L_d2.item(),idx)
-        #update gradients. TODO:max?
-        optimizer_D2.step()
+        writer.add_scalar('loss/triple', Lt.item(),idx)
+        #writer.add_scalar('loss/softmax', Ls.item(),idx)
+        #writer.add_scalar('loss/triple+softmax', L_d1.item(),idx)
+        #TODO  maybe not same with Eq.11. Detail: D2'G network parameters shoud be update in condition of same input with D1.
+
+        ##train D2
+        #generator_feature = G(x)
+        #generator_feature = generator_feature.transpose(dim0=0, dim1=1)
+        #generator_feature = generator_feature.unsqueeze(dim=1)
+        #pred_channel = D2(generator_feature)
+        ###get channel_label
+        ##TODO get channel label gracefully.
+        #channel_label = []
+        #for i in y:
+        #    if i.item() <= 379:
+        #        channel_label.append(0)    
+        #    else:
+        #        channel_label.append(1)    
+        #channel_label = torch.from_numpy(np.array(channel_label)).cuda()
+        #print ('--------------------------')
+        #print ('pred_channel.shape:')
+        #print (pred_channel.shape)
+        #print (pred_channel)
+        #print ('channel_label.shape:')
+        #print (channel_label.shape)
+        #print (channel_label)
+        ##TODO Eq.10 is max loss. check.
+        #L_d2 = 0 - Channel_CrossEntropyLoss(pred_channel,channel_label)
+        ##L_d2 = Channel_CrossEntropyLoss(pred_channel,channel_label)
+        #optimizer_D1G.zero_grad()
+        #optimizer_D2.zero_grad()
+        #L_d2.backward()
+        #writer.add_scalar('loss/channel', L_d2.item(),idx)
+        ##update gradients. TODO:max?
+        #optimizer_D2.step()
         
 
         # example input & output
@@ -587,6 +555,7 @@ def train_one_epoch(train_dataloader, G, D1, FC_D1, D2, Class_CrossEntropyLoss, 
 if __name__ == '__main__':
     args = parse_args()
     main(args)
+    writer.close()
     #dataset = MyDataset()
     #dataset.__getitem__(0)
 
