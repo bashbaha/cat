@@ -49,4 +49,3 @@
 ### Cautions
 
 1) gradient reversal layer may be worse when the model converges at the end.  [refer to: https://www.zhihu.com/question/266710153]
-
